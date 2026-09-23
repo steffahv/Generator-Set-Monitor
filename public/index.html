@@ -1,0 +1,1328 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Generator Set Monitor</title>
+    <style>
+      :root {
+        --bg: #eff3f8;
+        --panel: #ffffff;
+        --panel-soft: #f7f9fc;
+        --navy: #0f172a;
+        --primary: #2563eb;
+        --primary-soft: #dfeaff;
+        --success: #15803d;
+        --text: #0f172a;
+        --muted: #53657b;
+        --border: #dfe5ee;
+        --shadow: rgba(15, 23, 42, 0.05);
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        margin: 0;
+        font-family: Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .container {
+        max-width: 1320px;
+        margin: 0 auto;
+        padding: 28px 18px 42px;
+      }
+
+      .header {
+        background: linear-gradient(180deg, #0f172a 0%, #1f2a3d 100%);
+        color: white;
+        padding: 18px 22px;
+        border-radius: 18px;
+        margin-bottom: 22px;
+        box-shadow: 0 10px 18px var(--shadow);
+      }
+
+      .header h1 {
+        margin: 0;
+        font-size: clamp(2.4rem, 3.8vw, 4.1rem);
+        line-height: 1.05;
+      }
+
+      .header .subtitle {
+        display: none;
+      }
+
+      .section {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 20px 22px 18px;
+        margin-bottom: 22px;
+        box-shadow: 0 4px 12px var(--shadow);
+      }
+
+      .section-title {
+        margin: 0 0 16px;
+        font-size: clamp(1.6rem, 2vw, 2.2rem);
+        font-weight: 700;
+      }
+
+      .panel-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        flex-wrap: wrap;
+        margin-bottom: 18px;
+      }
+
+      .upload-row {
+        display: grid;
+        grid-template-columns: minmax(220px, 1fr) auto;
+        gap: 12px;
+        align-items: end;
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      label {
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+
+      input, select, button {
+        width: 100%;
+        padding: 11px 12px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        font-size: 14px;
+        background: white;
+        color: var(--text);
+      }
+
+      input[type="file"] {
+        background: var(--panel-soft);
+      }
+
+      button {
+        cursor: pointer;
+        background: var(--primary);
+        color: white;
+        border: none;
+        font-weight: 700;
+        transition: opacity 0.15s ease;
+      }
+
+      button:hover { opacity: 0.96; }
+
+      button.secondary {
+        background: #e7edf7;
+        color: var(--navy);
+      }
+
+      button.ghost {
+        background: #f3f6fb;
+        color: var(--navy);
+        border: 1px solid var(--border);
+      }
+
+      .button-row {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 14px;
+      }
+
+      .status {
+        margin-top: 12px;
+        font-size: 14px;
+        color: var(--muted);
+      }
+
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-end;
+        gap: 12px;
+        margin-bottom: 16px;
+      }
+
+      .field {
+        flex: 1 1 150px;
+        min-width: 150px;
+        max-width: 220px;
+      }
+
+      .metric-field {
+        flex: 0 0 170px;
+        min-width: 170px;
+        max-width: 170px;
+      }
+
+      .metric-field select[multiple] {
+        min-height: 74px;
+        max-height: 74px;
+        padding: 7px 10px;
+        width: 100%;
+        line-height: 1.35;
+      }
+
+      .column-dropdown {
+        position: relative;
+        display: inline-block;
+        width: 100%;
+        max-width: 260px;
+        margin: 8px 0 16px;
+      }
+
+      .column-toggle {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        background: #edf3ff;
+        color: var(--navy);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 11px 12px;
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
+      .column-menu {
+        position: absolute;
+        top: calc(100% + 8px);
+        left: 0;
+        width: 100%;
+        max-height: 280px;
+        overflow-y: auto;
+        background: white;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        box-shadow: 0 14px 26px rgba(15, 23, 42, 0.12);
+        padding: 8px;
+        z-index: 10;
+      }
+
+      .column-actions {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+
+      .column-option {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        font-size: 13px;
+        color: var(--navy);
+        cursor: pointer;
+      }
+
+      .column-option:hover {
+        background: var(--panel-soft);
+      }
+
+      .column-option input {
+        width: auto;
+        margin: 0;
+      }
+
+      .table-wrap {
+        overflow: auto;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 900px;
+      }
+
+      th, td {
+        text-align: left;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--border);
+        vertical-align: middle;
+      }
+
+      th {
+        background: var(--primary-soft);
+        font-size: 11px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--navy);
+      }
+
+      td {
+        font-size: 14px;
+      }
+
+      .tag {
+        display: inline-block;
+        padding: 5px 8px;
+        border-radius: 999px;
+        background: #eaf7ef;
+        color: var(--success);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      .summary-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+      }
+
+      @media (max-width: 760px) {
+        .upload-row,
+        .toolbar {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <header class="header">
+        <h1>Generator Set Monitor</h1>
+        <div class="subtitle">Upload files, inspect the raw data, and review the structured generator records by site.</div>
+      </header>
+
+      <section class="section">
+        <div class="panel-header">
+          <h2 class="section-title" style="margin:0;">Generators</h2>
+          <div id="tableStatus" class="muted">Loading inventory…</div>
+        </div>
+
+        <div class="toolbar">
+          <div class="field">
+            <label for="generatorSearch">Search</label>
+            <input id="generatorSearch" type="text" placeholder="Search site, IP, REG, alarm..." />
+          </div>
+
+          <div class="field">
+            <label for="siteSelect">Site</label>
+            <select id="siteSelect">
+              <option value="">All sites</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="regFilter">REG</label>
+            <select id="regFilter">
+              <option value="all">All REG</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="comparisonPeriodSelect">Variance</label>
+            <select id="comparisonPeriodSelect">
+              <option value="none">No comparison</option>
+              <option value="DoD">DoD</option>
+              <option value="WoW">WoW</option>
+              <option value="6DayBack">6D Back</option>
+              <option value="MoM">MoM</option>
+            </select>
+          </div>
+
+          <div class="field metric-field">
+            <label for="comparisonMetricSelect">Metric</label>
+            <select id="comparisonMetricSelect" multiple size="2" class="metric-select">
+              <option value="running_hours" selected>Running H</option>
+              <option value="num_starts">Num Starts</option>
+            </select>
+          </div>
+
+          <div class="field">
+            <label for="updateDateFilter">Update time</label>
+            <input id="updateDateFilter" type="date" />
+          </div>
+
+          <div class="field">
+            <label for="uploadDateFilter">Upload time</label>
+            <input id="uploadDateFilter" type="date" />
+          </div>
+
+          <div class="field">
+            <label for="snapshotDateFilter">Reference Date</label>
+            <input id="snapshotDateFilter" type="date" />
+          </div>
+
+          <div class="field">
+            <label>&nbsp;</label>
+            <button id="refreshButton" class="secondary" type="button">Refresh</button>
+          </div>
+        </div>
+
+        <div class="column-dropdown">
+          <button id="columnToggle" class="column-toggle" type="button" aria-expanded="false">
+            Columns <span id="columnToggleCount">0/0</span>
+          </button>
+          <div id="columnPicker" class="column-menu" hidden>
+            <div class="column-actions">
+              <button id="selectAllColumns" type="button" class="ghost" style="padding:8px 10px; font-size:12px;">Select all</button>
+              <button id="clearAllColumns" type="button" class="ghost" style="padding:8px 10px; font-size:12px;">Clear all</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <div id="mainTableContainer"></div>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2 class="section-title">Upload Excel</h2>
+        <div class="upload-row">
+          <div class="field">
+            <label for="fileInput">Select file</label>
+            <input id="fileInput" type="file" accept=".xlsx,.xls,.csv" />
+          </div>
+          <div class="field">
+            <label>&nbsp;</label>
+            <button id="uploadButton" type="button">Upload file</button>
+          </div>
+        </div>
+        <div id="uploadStatus" class="status">Waiting for a file upload.</div>
+      </section>
+
+      <section class="section">
+        <div class="panel-header" style="margin-bottom:12px;">
+          <h2 class="section-title" style="margin:0;">Recent uploads</h2>
+          <div class="field" style="min-width:220px; margin:0;">
+            <label for="uploadHistoryFilter">Filter by snapshot date</label>
+            <input id="uploadHistoryFilter" type="date" />
+          </div>
+        </div>
+        <div class="table-wrap">
+          <div id="uploadsTableContainer"></div>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      const API_BASE = window.location.origin;
+      let allGenerators = [];
+
+      const uploadButton = document.getElementById('uploadButton');
+      const fileInput = document.getElementById('fileInput');
+      const uploadStatus = document.getElementById('uploadStatus');
+      const tableStatus = document.getElementById('tableStatus');
+      const uploadsTableContainer = document.getElementById('uploadsTableContainer');
+      const mainTableContainer = document.getElementById('mainTableContainer');
+      const siteSelect = document.getElementById('siteSelect');
+      const generatorSearch = document.getElementById('generatorSearch');
+      const regFilter = document.getElementById('regFilter');
+      const updateDateFilter = document.getElementById('updateDateFilter');
+      const uploadDateFilter = document.getElementById('uploadDateFilter');
+      const snapshotDateFilter = document.getElementById('snapshotDateFilter');
+      const uploadHistoryFilter = document.getElementById('uploadHistoryFilter');
+      const comparisonPeriodSelect = document.getElementById('comparisonPeriodSelect');
+      const comparisonMetricSelect = document.getElementById('comparisonMetricSelect');
+      const columnPicker = document.getElementById('columnPicker');
+      const columnToggle = document.getElementById('columnToggle');
+      const columnToggleCount = document.getElementById('columnToggleCount');
+      const selectAllColumnsButton = document.getElementById('selectAllColumns');
+      const clearAllColumnsButton = document.getElementById('clearAllColumns');
+
+      const allColumns = [
+        { key: 'site', label: 'Site' },
+        { key: 'router_ip', label: 'Router IP' },
+        { key: 'reg', label: 'REG' },
+        { key: 'ip', label: 'IP' },
+        { key: 'running_hours', label: 'Running H' },
+        { key: 'num_starts', label: 'Num Starts' },
+        { key: 'update_time', label: 'Update time' },
+        { key: 'upload_time', label: 'Upload time' },
+        { key: 'snapshot_date', label: 'Snapshot date' },
+      ];
+
+      const visibleColumns = [
+        { key: 'site', label: 'Site' },
+        { key: 'router_ip', label: 'Router IP' },
+        { key: 'reg', label: 'REG' },
+        { key: 'running_hours', label: 'Running H' },
+        { key: 'num_starts', label: 'Num Starts' },
+        { key: 'snapshot_date', label: 'Snapshot date' },
+      ];
+
+      function ensureSiteFirst() {
+        const siteColumn = allColumns.find((column) => column.key === 'site');
+        if (!siteColumn) {
+          return;
+        }
+
+        const filtered = allColumns.filter((column) => visibleColumns.some((item) => item.key === column.key));
+        const ordered = [siteColumn, ...filtered.filter((column) => column.key !== 'site')];
+        visibleColumns.splice(0, visibleColumns.length, ...ordered);
+      }
+
+      function updateColumnToggleLabel() {
+        columnToggleCount.textContent = `${visibleColumns.length}/${allColumns.length}`;
+      }
+
+      function renderColumnPicker() {
+        const existingActions = document.querySelector('.column-actions');
+        const optionsWrapper = document.createElement('div');
+
+        allColumns.forEach((column) => {
+          const option = document.createElement('label');
+          option.className = 'column-option';
+
+          const checkbox = document.createElement('input');
+          checkbox.type = 'checkbox';
+          checkbox.checked = visibleColumns.some((item) => item.key === column.key);
+          checkbox.disabled = column.key === 'site';
+          checkbox.addEventListener('change', () => {
+            if (column.key === 'site') {
+              checkbox.checked = true;
+              return;
+            }
+
+            if (checkbox.checked) {
+              if (!visibleColumns.some((item) => item.key === column.key)) {
+                visibleColumns.push(column);
+              }
+            } else {
+              const index = visibleColumns.findIndex((item) => item.key === column.key);
+              if (index !== -1) {
+                visibleColumns.splice(index, 1);
+              }
+            }
+
+            if (!visibleColumns.some((item) => item.key === 'site')) {
+              visibleColumns.unshift(allColumns[0]);
+            }
+
+            ensureSiteFirst();
+            updateColumnToggleLabel();
+            renderGeneratorTable();
+          });
+
+          const text = document.createElement('span');
+          text.textContent = column.label;
+          option.appendChild(checkbox);
+          option.appendChild(text);
+          optionsWrapper.appendChild(option);
+        });
+
+        if (existingActions) {
+          columnPicker.innerHTML = '';
+          columnPicker.appendChild(existingActions);
+        }
+        columnPicker.appendChild(optionsWrapper);
+        updateColumnToggleLabel();
+      }
+
+      selectAllColumnsButton.addEventListener('click', () => {
+        visibleColumns.splice(0, visibleColumns.length, ...allColumns);
+        ensureSiteFirst();
+        renderColumnPicker();
+        renderGeneratorTable();
+      });
+
+      clearAllColumnsButton.addEventListener('click', () => {
+        visibleColumns.splice(0, visibleColumns.length, allColumns[0]);
+        ensureSiteFirst();
+        renderColumnPicker();
+        renderGeneratorTable();
+      });
+
+      columnToggle.addEventListener('click', () => {
+        const isHidden = columnPicker.hasAttribute('hidden');
+        columnPicker.toggleAttribute('hidden', !isHidden);
+        columnToggle.setAttribute('aria-expanded', String(isHidden));
+      });
+
+      document.addEventListener('click', (event) => {
+        const isInside = event.target.closest('.column-dropdown');
+        if (!isInside) {
+          columnPicker.setAttribute('hidden', 'hidden');
+          columnToggle.setAttribute('aria-expanded', 'false');
+        }
+      });
+
+      async function fetchJson(url, options = {}) {
+        const response = await fetch(url, options);
+        const rawText = await response.text();
+        if (!response.ok) {
+          throw new Error(rawText || 'Request failed');
+        }
+        return rawText ? JSON.parse(rawText) : null;
+      }
+
+      function parseDateValue(value) {
+        if (value === null || value === undefined || value === '') {
+          return null;
+        }
+
+        const stringValue = String(value).trim();
+        if (!stringValue) {
+          return null;
+        }
+
+        const yyyyMmDdMatch = stringValue.match(/^\s*(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?))?\s*$/);
+        if (yyyyMmDdMatch) {
+          const year = Number(yyyyMmDdMatch[1]);
+          const month = Number(yyyyMmDdMatch[2]);
+          const day = Number(yyyyMmDdMatch[3]);
+          const date = new Date(year, month - 1, day);
+          if (!Number.isNaN(date.getTime())) {
+            return date;
+          }
+        }
+
+        const ddmmyyMatch = stringValue.match(/^\s*(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+(\d{1,2}:\d{2}(?::\d{2})?))?\s*$/);
+        if (ddmmyyMatch) {
+          const day = Number(ddmmyyMatch[1]);
+          const month = Number(ddmmyyMatch[2]);
+          let year = Number(ddmmyyMatch[3]);
+          if (year < 100) {
+            year += 2000;
+          }
+          const date = new Date(year, month - 1, day);
+          if (!Number.isNaN(date.getTime())) {
+            return date;
+          }
+        }
+
+        const isoLike = stringValue.includes('T') ? stringValue : stringValue.replace(' ', 'T');
+        const date = new Date(isoLike);
+        return Number.isNaN(date.getTime()) ? null : date;
+      }
+
+      function formatDateTimeValue(value) {
+        const date = parseDateValue(value);
+        if (!date) {
+          return value ?? '';
+        }
+
+        const day = String(date.getDate()).padStart(2, '0');
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const year = date.getFullYear();
+        const hours = String(date.getHours()).padStart(2, '0');
+        const minutes = String(date.getMinutes()).padStart(2, '0');
+        return `${day}/${month}/${year} ${hours}:${minutes}`;
+      }
+
+      function getDateOnlyValue(value) {
+        if (value === null || value === undefined || value === '') {
+          return '';
+        }
+
+        const stringValue = String(value).trim();
+        if (!stringValue) {
+          return '';
+        }
+
+        const yyyyMmDdMatch = stringValue.match(/^\s*(\d{4})-(\d{1,2})-(\d{1,2})\s*$/);
+        if (yyyyMmDdMatch) {
+          const year = Number(yyyyMmDdMatch[1]);
+          const month = Number(yyyyMmDdMatch[2]);
+          const day = Number(yyyyMmDdMatch[3]);
+          return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        }
+
+        const date = parseDateValue(value);
+        if (!date) {
+          return '';
+        }
+
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+      }
+
+      function getMetricLabel(metric) {
+        if (metric === 'running_hours') return 'Running H';
+        if (metric === 'num_starts') return 'Num Starts';
+        return 'Metric';
+      }
+
+      function getComparisonLabel(metricKey = comparisonMetricSelect.value) {
+        return 'VAR';
+      }
+
+      function getMetricColor(metricKey) {
+        if (metricKey === 'running_hours') return '#dfeaff';
+        if (metricKey === 'num_starts') return '#e8f7ea';
+        if (metricKey === 'fuel_percent') return '#fff0d9';
+        if (metricKey === 'total_fuel_consumption') return '#fde7ef';
+        if (metricKey === 'load_amperes') return '#efe5ff';
+        return '#dfeaff';
+      }
+
+      function getDeltaColor(metricKey) {
+        return getMetricColor(metricKey);
+      }
+
+      function toNumber(value) {
+        if (value === null || value === undefined || value === '') {
+          return null;
+        }
+
+        const parsed = Number(String(value).replace(/[^0-9.+-]/g, ''));
+        return Number.isFinite(parsed) ? parsed : null;
+      }
+
+      function formatDateKey(dateValue) {
+        if (!dateValue) {
+          return '';
+        }
+
+        const date = parseDateValue(dateValue);
+        if (!date) {
+          return '';
+        }
+
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+      }
+
+      function formatDisplayDate(dateValue) {
+        const date = parseDateValue(dateValue);
+        if (!date) {
+          return '';
+        }
+
+        const day = String(date.getDate()).padStart(2, '0');
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const year = date.getFullYear();
+        return `${day}/${month}/${year}`;
+      }
+
+      function getSnapshotDateForRow(row) {
+        return parseDateValue(row.snapshot_date || row.update_time || row.upload_time);
+      }
+
+      function getLatestSnapshotDate(rows = allGenerators) {
+        const dates = rows
+          .map((row) => getSnapshotDateForRow(row))
+          .filter(Boolean)
+          .map((date) => new Date(date.getTime()));
+
+        if (!dates.length) {
+          return null;
+        }
+
+        return new Date(Math.max(...dates.map((date) => date.getTime())));
+      }
+
+      function getActiveSnapshotDate() {
+        const selectedReference = snapshotDateFilter && snapshotDateFilter.value
+          ? snapshotDateFilter.value
+          : '';
+
+        if (selectedReference) {
+          return parseDateValue(selectedReference) || getLatestSnapshotDate(allGenerators);
+        }
+
+        return getLatestSnapshotDate(allGenerators);
+      }
+
+      function getColumnHeaderLabel(columnKey, fallbackLabel) {
+        const isComparisonActive = comparisonPeriodSelect.value !== 'none';
+        if (isComparisonActive) {
+          return fallbackLabel;
+        }
+
+        const snapshotDate = getActiveSnapshotDate();
+        if (!snapshotDate) {
+          return fallbackLabel;
+        }
+
+        const snapshotAwareKeys = [
+          'running_hours',
+          'num_starts',
+          'fuel_percent',
+          'total_fuel_consumption',
+          'load_amperes',
+          'snapshot_date',
+          'update_time',
+          'upload_time',
+        ];
+
+        if (!snapshotAwareKeys.includes(columnKey)) {
+          return fallbackLabel;
+        }
+
+        return `${formatDisplayDate(snapshotDate)} ${fallbackLabel}`;
+      }
+
+      function addDays(date, value) {
+        const nextDate = new Date(date);
+        nextDate.setDate(nextDate.getDate() + value);
+        return nextDate;
+      }
+
+      function addMonths(date, value) {
+        const nextDate = new Date(date);
+        nextDate.setMonth(nextDate.getMonth() + value);
+        return nextDate;
+      }
+
+      function getPreviousSnapshotDate(referenceDate, period) {
+        if (period === 'DoD') return addDays(referenceDate, -1);
+        if (period === 'WoW') return addDays(referenceDate, -7);
+        if (period === '6DayBack') return addDays(referenceDate, -6);
+        if (period === 'MoM') return addMonths(referenceDate, -1);
+        return null;
+      }
+
+      function getGeneratorIdentity(row) {
+        return [
+          String(row.site_id ?? ''),
+          String(row.router_ip ?? ''),
+          String(row.reg ?? ''),
+          String(row.ip ?? ''),
+        ].join('|').toLowerCase();
+      }
+
+      function findRowAtSnapshot(rows, currentRow, snapshotDate) {
+        if (!snapshotDate) {
+          return null;
+        }
+
+        const targetKey = formatDateKey(snapshotDate);
+        const identity = getGeneratorIdentity(currentRow);
+
+        const matches = rows.filter((row) => {
+          if (getGeneratorIdentity(row) !== identity) {
+            return false;
+          }
+          return formatDateKey(getSnapshotDateForRow(row)) === targetKey;
+        });
+
+        return matches.length ? matches[matches.length - 1] : null;
+      }
+
+      function computeComparisonDelta(row, period, metricKey) {
+        if (!period || period === 'none') {
+          return null;
+        }
+
+        const activeSnapshotDate = getActiveSnapshotDate();
+        if (!activeSnapshotDate) {
+          return null;
+        }
+
+        const previousSnapshotDate = getPreviousSnapshotDate(activeSnapshotDate, period);
+        if (!previousSnapshotDate) {
+          return null;
+        }
+
+        const currentRow = findRowAtSnapshot(allGenerators, row, activeSnapshotDate);
+        const previousRow = findRowAtSnapshot(allGenerators, row, previousSnapshotDate);
+        if (!currentRow || !previousRow) {
+          return null;
+        }
+
+        const currentValue = toNumber(currentRow[metricKey]);
+        const previousValue = toNumber(previousRow[metricKey]);
+        if (currentValue === null || previousValue === null) {
+          return null;
+        }
+
+        return {
+          currentValue,
+          currentDate: activeSnapshotDate,
+          delta: currentValue - previousValue,
+          previousValue,
+          previousDate: previousSnapshotDate,
+        };
+      }
+
+      function getSelectedComparisonMetrics() {
+        const selected = Array.from(comparisonMetricSelect.selectedOptions).map((option) => option.value);
+        return selected.length ? selected : ['running_hours'];
+      }
+
+      function renderTable(container, rows, columns) {
+        if (!rows || rows.length === 0) {
+          container.innerHTML = '<div class="muted" style="padding:18px;">No data available.</div>';
+          return;
+        }
+
+        const period = comparisonPeriodSelect.value;
+        const comparisonMetrics = getSelectedComparisonMetrics();
+
+        const rowsWithDelta = rows.map((row) => {
+          const comparisonValues = {};
+          if (period !== 'none') {
+            comparisonMetrics.forEach((metricKey) => {
+              const comparison = computeComparisonDelta(row, period, metricKey);
+              comparisonValues[`comparison_current_${metricKey}`] = comparison ? comparison.currentValue : null;
+              comparisonValues[`comparison_delta_${metricKey}`] = comparison ? comparison.delta : null;
+              comparisonValues[`comparison_previous_${metricKey}`] = comparison ? comparison.previousValue : null;
+            });
+          }
+
+          return {
+            ...row,
+            ...comparisonValues,
+          };
+        });
+
+        const tableColumns = [...columns].filter((column) => {
+          const key = typeof column === 'string' ? column : column.key;
+          return !key.startsWith('comparison_') && key !== 'snapshot_date';
+        });
+
+        if (period !== 'none') {
+          const activeSnapshotDate = getActiveSnapshotDate();
+          const filteredColumns = tableColumns.filter((column) => {
+            const key = typeof column === 'string' ? column : column.key;
+            return !comparisonMetrics.includes(key);
+          });
+
+          let insertionIndex = filteredColumns.length;
+          const selectedMetricIndex = comparisonMetrics
+            .map((metricKey) => tableColumns.findIndex((column) => {
+              const key = typeof column === 'string' ? column : column.key;
+              return key === metricKey;
+            }))
+            .filter((index) => index >= 0)
+            .sort((a, b) => a - b)[0];
+
+          if (selectedMetricIndex !== undefined) {
+            insertionIndex = selectedMetricIndex;
+          }
+
+          const comparisonBlocks = [];
+          comparisonMetrics.forEach((metricKey) => {
+            const metricLabel = getMetricLabel(metricKey);
+            const previousSnapshotDate = activeSnapshotDate ? getPreviousSnapshotDate(activeSnapshotDate, period) : null;
+            comparisonBlocks.push(
+              { key: `comparison_previous_${metricKey}`, label: `${previousSnapshotDate ? formatDisplayDate(previousSnapshotDate) : 'Prev'} ${metricLabel}` },
+              { key: `comparison_delta_${metricKey}`, label: getComparisonLabel(metricKey) },
+              { key: `comparison_current_${metricKey}`, label: `${activeSnapshotDate ? formatDisplayDate(activeSnapshotDate) : 'Current'} ${metricLabel}` },
+            );
+          });
+
+          tableColumns.splice(0, tableColumns.length, ...filteredColumns);
+          tableColumns.splice(insertionIndex, 0, ...comparisonBlocks);
+        }
+
+        const table = document.createElement('table');
+        const thead = document.createElement('thead');
+        const tbody = document.createElement('tbody');
+
+        const headerRow = document.createElement('tr');
+        tableColumns.forEach((column) => {
+          const th = document.createElement('th');
+          const columnKey = typeof column === 'string' ? column : column.key;
+          const isComparisonColumn = typeof columnKey === 'string' && columnKey.startsWith('comparison_');
+          if (isComparisonColumn) {
+            const metricKey = columnKey.replace(/^comparison_(previous|delta|current)_/, '');
+            th.style.background = getMetricColor(metricKey);
+            th.style.color = '#0f172a';
+            th.style.fontWeight = '800';
+            th.style.borderLeft = '2px solid #7aa2ff';
+          }
+          th.textContent = isComparisonColumn
+            ? (column.label || column)
+            : getColumnHeaderLabel(columnKey, column.label || column);
+          headerRow.appendChild(th);
+        });
+        thead.appendChild(headerRow);
+        table.appendChild(thead);
+
+        rowsWithDelta.forEach((row) => {
+          const tr = document.createElement('tr');
+          tableColumns.forEach((column) => {
+            const td = document.createElement('td');
+            const key = typeof column === 'string' ? column : column.key;
+            const value = key.startsWith('comparison_current_')
+              ? row[`comparison_current_${key.replace('comparison_current_', '')}`]
+              : key.startsWith('comparison_delta_')
+                ? row[`comparison_delta_${key.replace('comparison_delta_', '')}`]
+                : key.startsWith('comparison_previous_')
+                  ? row[`comparison_previous_${key.replace('comparison_previous_', '')}`]
+                  : (row[key] ?? '');
+            const isDateField = key === 'update_time' || key === 'upload_time' || key === 'snapshot_date';
+            const metricKey = key.startsWith('comparison_') ? key.replace(/^comparison_(previous|delta|current)_/, '') : null;
+
+            if (key.startsWith('comparison_current_')) {
+              td.style.background = metricKey ? getMetricColor(metricKey) : '#dfeaff';
+              if (value === null || value === undefined) {
+                td.textContent = '-';
+              } else {
+                td.textContent = Number(value).toFixed(2);
+              }
+            } else if (key.startsWith('comparison_delta_')) {
+              td.style.background = metricKey ? getDeltaColor(metricKey) : '#f3f4f6';
+              td.style.color = value !== null && value !== undefined && Number(value) < 0 ? '#b42318' : '#027a48';
+              td.style.fontWeight = '700';
+              if (value === null || value === undefined) {
+                td.textContent = '-';
+              } else {
+                const formatted = Number(value).toFixed(2);
+                td.textContent = `${value >= 0 ? '+' : ''}${formatted}`;
+              }
+            } else if (key.startsWith('comparison_previous_')) {
+              td.style.background = metricKey ? getMetricColor(metricKey) : '#dfeaff';
+              if (value === null || value === undefined) {
+                td.textContent = '-';
+              } else {
+                td.textContent = Number(value).toFixed(2);
+              }
+            } else if (isDateField) {
+              if (key === 'snapshot_date') {
+                const date = parseDateValue(value);
+                if (!date) {
+                  td.textContent = value || '';
+                } else {
+                  const day = String(date.getDate()).padStart(2, '0');
+                  const month = String(date.getMonth() + 1).padStart(2, '0');
+                  const year = date.getFullYear();
+                  td.textContent = `${day}/${month}/${year}`;
+                }
+              } else {
+                td.textContent = formatDateTimeValue(value);
+              }
+            } else {
+              td.textContent = value;
+            }
+
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+
+        table.appendChild(tbody);
+        container.innerHTML = '';
+        container.appendChild(table);
+      }
+
+      function renderSiteOptions(sites) {
+        siteSelect.innerHTML = '<option value="">All sites</option>';
+        sites.forEach((site) => {
+          const option = document.createElement('option');
+          option.value = site.site_id;
+          option.textContent = `${site.site_name} (${site.router_ip})`;
+          siteSelect.appendChild(option);
+        });
+      }
+
+      function normalizeText(value) {
+        return String(value ?? '').trim().toLowerCase();
+      }
+
+      function populateRegFilter(rows) {
+        const values = [...new Set(rows
+          .map((row) => String(row.reg ?? '').trim())
+          .filter(Boolean))].sort();
+
+        regFilter.innerHTML = '<option value="all">All REG</option>';
+        values.forEach((value) => {
+          const option = document.createElement('option');
+          option.value = value;
+          option.textContent = value;
+          regFilter.appendChild(option);
+        });
+
+        if (!values.includes(regFilter.value)) {
+          regFilter.value = 'all';
+        }
+      }
+
+      function renderGeneratorTable() {
+        const searchTerm = normalizeText(generatorSearch.value);
+        const selectedSite = siteSelect.value;
+        const selectedReg = regFilter.value;
+        const selectedUpdateDate = updateDateFilter.value;
+        const selectedUploadDate = uploadDateFilter.value;
+        const selectedSnapshotDate = snapshotDateFilter.value;
+        const latestSnapshotDate = getLatestSnapshotDate(allGenerators);
+        if (!selectedSnapshotDate && latestSnapshotDate) {
+          snapshotDateFilter.value = formatDateKey(latestSnapshotDate);
+        }
+        const effectiveSnapshotDate = snapshotDateFilter.value || (latestSnapshotDate ? formatDateKey(latestSnapshotDate) : '');
+
+        const filtered = allGenerators.filter((row) => {
+          if (selectedSite && String(row.site_id) !== String(selectedSite)) {
+            return false;
+          }
+
+          if (selectedReg !== 'all' && normalizeText(row.reg) !== normalizeText(selectedReg)) {
+            return false;
+          }
+
+          if (selectedUpdateDate && getDateOnlyValue(row.update_time) !== selectedUpdateDate) {
+            return false;
+          }
+
+          if (selectedUploadDate && getDateOnlyValue(row.upload_time) !== selectedUploadDate) {
+            return false;
+          }
+
+          if (effectiveSnapshotDate && getDateOnlyValue(row.snapshot_date) !== effectiveSnapshotDate) {
+            return false;
+          }
+
+          if (!searchTerm) {
+            return true;
+          }
+
+          const haystack = [
+            row.site,
+            row.router_ip,
+            row.site_type,
+            row.reg,
+            row.ip,
+            row.alarms,
+            row.engine_state,
+            row.controller_mode,
+            row.update_time,
+            row.upload_time,
+          ].join(' ').toLowerCase();
+
+          return haystack.includes(searchTerm);
+        });
+
+        if (!filtered.length) {
+          mainTableContainer.innerHTML = '<div class="muted" style="padding:18px;">No matching generators found.</div>';
+          tableStatus.textContent = 'No matching generators found.';
+          return;
+        }
+
+        tableStatus.textContent = `Showing ${filtered.length} generator records.`;
+        renderTable(mainTableContainer, filtered, visibleColumns);
+      }
+
+      uploadButton.addEventListener('click', async () => {
+        const file = fileInput.files[0];
+        if (!file) {
+          uploadStatus.textContent = 'Please choose a file first.';
+          return;
+        }
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+          uploadStatus.textContent = 'Uploading file...';
+          const result = await fetchJson(`${API_BASE}/upload-excel`, {
+            method: 'POST',
+            body: formData,
+          });
+
+          uploadStatus.textContent = `File uploaded successfully: ${result.filename} (${result.row_count} rows)`;
+          await loadUploads();
+          await loadSites();
+          const currentSiteId = siteSelect.value || '';
+          if (currentSiteId) {
+            await loadGenerators(currentSiteId);
+          }
+        } catch (error) {
+          uploadStatus.textContent = `Upload failed: ${error.message}`;
+        }
+      });
+
+      function formatUploadDate(value) {
+        if (!value) {
+          return '';
+        }
+
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+          return '';
+        }
+
+        const day = String(date.getDate()).padStart(2, '0');
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const year = date.getFullYear();
+        return `${day}/${month}/${year}`;
+      }
+
+      async function loadUploads() {
+        try {
+          const uploads = await fetchJson(`${API_BASE}/uploads`);
+          const uploadColumns = [
+            { key: 'id', label: 'ID' },
+            { key: 'filename', label: 'Filename' },
+            { key: 'snapshot_date', label: 'Snapshot date' },
+            { key: 'created_at', label: 'Upload date' },
+            { key: 'row_count', label: 'Row count' },
+            { key: 'status', label: 'Status' },
+            { key: 'actions', label: 'Actions' },
+          ];
+
+          const rows = uploads
+            .filter((upload) => {
+              if (!uploadHistoryFilter.value) {
+                return true;
+              }
+              return getDateOnlyValue(upload.snapshot_date || upload.created_at) === uploadHistoryFilter.value;
+            })
+            .map((upload) => ({
+              ...upload,
+              snapshot_date: upload.snapshot_date ? (() => {
+                const date = parseDateValue(upload.snapshot_date);
+                if (!date) {
+                  return '';
+                }
+                const day = String(date.getDate()).padStart(2, '0');
+                const month = String(date.getMonth() + 1).padStart(2, '0');
+                const year = date.getFullYear();
+                return `${day}/${month}/${year}`;
+              })() : '',
+              created_at: formatUploadDate(upload.created_at),
+              actions: `delete-${upload.id}`,
+            }));
+
+          const table = document.createElement('table');
+          const thead = document.createElement('thead');
+          const tbody = document.createElement('tbody');
+
+          const headerRow = document.createElement('tr');
+          uploadColumns.forEach((column) => {
+            const th = document.createElement('th');
+            th.textContent = column.label;
+            headerRow.appendChild(th);
+          });
+          thead.appendChild(headerRow);
+          table.appendChild(thead);
+
+          rows.forEach((row) => {
+            const tr = document.createElement('tr');
+            uploadColumns.forEach((column) => {
+              const td = document.createElement('td');
+              if (column.key === 'actions') {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.textContent = 'Delete';
+                button.className = 'ghost';
+                button.style.width = 'auto';
+                button.style.padding = '7px 12px';
+                button.addEventListener('click', async () => {
+                  const confirmed = window.confirm(`Delete upload history: ${row.filename}? This only removes the upload record and does not alter the structured site/generator data.`);
+                  if (!confirmed) {
+                    return;
+                  }
+
+                  try {
+                    await fetchJson(`${API_BASE}/uploads/${row.id}`, { method: 'DELETE' });
+                    await loadUploads();
+                    uploadStatus.textContent = `Deleted upload record: ${row.filename}`;
+                  } catch (error) {
+                    uploadStatus.textContent = `Could not delete upload record: ${error.message}`;
+                  }
+                });
+                td.appendChild(button);
+              } else {
+                td.textContent = row[column.key] ?? '';
+              }
+              tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+          });
+
+          table.appendChild(tbody);
+          uploadsTableContainer.innerHTML = '';
+          uploadsTableContainer.appendChild(table);
+        } catch (error) {
+          uploadsTableContainer.innerHTML = `<div class="muted" style="padding:18px;">Could not load uploads: ${error.message}</div>`;
+        }
+      }
+
+      async function loadSites() {
+        try {
+          const sites = await fetchJson(`${API_BASE}/sites`);
+          renderSiteOptions(sites);
+          return sites;
+        } catch (error) {
+          tableStatus.textContent = `Could not load sites: ${error.message}`;
+          return [];
+        }
+      }
+
+      async function loadGenerators(siteId) {
+        const targetSiteId = siteId || '';
+
+        try {
+          if (!targetSiteId) {
+            allGenerators = await fetchJson(`${API_BASE}/generators`);
+          } else {
+            allGenerators = await fetchJson(`${API_BASE}/sites/${targetSiteId}/generators`);
+          }
+
+          const latestSnapshotDate = getLatestSnapshotDate(allGenerators);
+          if (!snapshotDateFilter.value && latestSnapshotDate) {
+            snapshotDateFilter.value = formatDateKey(latestSnapshotDate);
+          }
+
+          populateRegFilter(allGenerators);
+          renderGeneratorTable();
+        } catch (error) {
+          tableStatus.textContent = `Could not load generators: ${error.message}`;
+          allGenerators = [];
+          populateRegFilter(allGenerators);
+          renderGeneratorTable();
+        }
+      }
+
+      document.getElementById('refreshButton').addEventListener('click', async () => {
+        const currentSite = siteSelect.value || '';
+        await loadSites();
+        if (currentSite) {
+          siteSelect.value = currentSite;
+        } else {
+          siteSelect.value = '';
+        }
+        await loadGenerators(siteSelect.value || '');
+      });
+
+      siteSelect.addEventListener('change', () => {
+        loadGenerators(siteSelect.value || '');
+      });
+
+      regFilter.addEventListener('change', renderGeneratorTable);
+      generatorSearch.addEventListener('input', renderGeneratorTable);
+      comparisonPeriodSelect.addEventListener('change', renderGeneratorTable);
+      comparisonMetricSelect.addEventListener('change', renderGeneratorTable);
+      updateDateFilter.addEventListener('change', renderGeneratorTable);
+      uploadDateFilter.addEventListener('change', renderGeneratorTable);
+      snapshotDateFilter.addEventListener('change', renderGeneratorTable);
+      uploadHistoryFilter.addEventListener('change', loadUploads);
+
+      async function init() {
+        renderColumnPicker();
+        await loadUploads();
+        const sites = await loadSites();
+        siteSelect.value = '';
+        if (sites.length) {
+          await loadGenerators('');
+        } else {
+          renderGeneratorTable();
+        }
+      }
+
+      init();
+    </script>
+  </body>
+</html>
