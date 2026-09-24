@@ -1,16 +1,21 @@
 import re
 import logging
 import math
+import os
+from pathlib import Path
 from datetime import datetime
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import text, inspect
 import pandas as pd
 import json
 from io import BytesIO
 
+load_dotenv()
 logger = logging.getLogger("myappge.upload")
 logging.basicConfig(level=logging.INFO)
 
@@ -19,6 +24,8 @@ from app.mapping import normalize_excel_row
 from app.models import ExcelUpload, RawDataRow, Site, Generator, Rectifier
 
 app = FastAPI(title="myapp-ge", version="0.1.0")
+PUBLIC_IMAGES_DIR = Path(__file__).resolve().parent.parent / "public" / "images"
+app.mount("/images", StaticFiles(directory=str(PUBLIC_IMAGES_DIR)), name="images")
 
 
 def extract_snapshot_date(filename: str):

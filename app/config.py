@@ -5,10 +5,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_name: str = "myapp-ge"
     app_env: str = "development"
-    database_url: str = "postgresql+psycopg://myappge:myappge123@localhost:5432/myappge"
+    
+    # Pydantic searchs .env 
+    database_url: str 
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # Agregamos un fallback de ruta por si ejecutas uvicorn desde una subcarpeta
+        env_file=(".env", "../.env"), 
         env_file_encoding="utf-8",
         case_sensitive=False,
     )

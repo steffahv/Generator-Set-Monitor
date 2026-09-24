@@ -43,6 +43,23 @@
         box-shadow: 0 10px 18px var(--shadow);
       }
 
+      .header-brand {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+      }
+
+      .header-logo {
+        display: block;
+        flex: 0 0 auto;
+        width: 110px;
+        height: 76px;
+        padding: 4px;
+        border-radius: 8px;
+        background: #0f172a;
+        object-fit: contain;
+      }
+
       .header h1 {
         margin: 0;
         font-size: clamp(2.4rem, 3.8vw, 4.1rem);
@@ -178,9 +195,30 @@
       .column-dropdown {
         position: relative;
         display: inline-block;
-        width: 100%;
-        max-width: 260px;
+        flex: 0 0 260px;
+        max-width: 100%;
+        margin: 0;
+      }
+
+      .column-toolbar {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 12px;
         margin: 8px 0 16px;
+      }
+
+      .comparison-dates {
+        padding: 11px 16px;
+        border: 1px solid #9bbcff;
+        border-radius: 10px;
+        background: #e8f0ff;
+        color: #123b82;
+        font-size: 18px;
+        font-weight: 800;
+        letter-spacing: 0.02em;
+        line-height: 1.2;
+        white-space: nowrap;
       }
 
       .column-toggle {
@@ -299,13 +337,29 @@
         .toolbar {
           grid-template-columns: 1fr;
         }
+
+        .header-brand {
+          gap: 14px;
+        }
+
+        .header-logo {
+          width: 82px;
+          height: 58px;
+        }
+
+        .header h1 {
+          font-size: clamp(1.7rem, 7vw, 2.4rem);
+        }
       }
     </style>
   </head>
   <body>
     <div class="container">
       <header class="header">
-        <h1>Generator Set Monitor</h1>
+        <div class="header-brand">
+          <img class="header-logo" src="/images/yofc_logo.png" alt="YOFC logo" />
+          <h1>Generator Set Monitor</h1>
+        </div>
         <div class="subtitle">Upload files, inspect the raw data, and review the structured generator records by site.</div>
       </header>
 
@@ -354,6 +408,14 @@
             </select>
           </div>
 
+          <div id="comparisonSortField" class="field" hidden>
+            <label for="comparisonSortSelect">Sort by VAR</label>
+            <select id="comparisonSortSelect">
+              <option value="desc">DESC</option>
+              <option value="asc">ASC</option>
+            </select>
+          </div>
+
           <div class="field">
             <label for="updateDateFilter">Update time</label>
             <input id="updateDateFilter" type="date" />
@@ -375,16 +437,19 @@
           </div>
         </div>
 
-        <div class="column-dropdown">
-          <button id="columnToggle" class="column-toggle" type="button" aria-expanded="false">
-            Columns <span id="columnToggleCount">0/0</span>
-          </button>
-          <div id="columnPicker" class="column-menu" hidden>
-            <div class="column-actions">
-              <button id="selectAllColumns" type="button" class="ghost" style="padding:8px 10px; font-size:12px;">Select all</button>
-              <button id="clearAllColumns" type="button" class="ghost" style="padding:8px 10px; font-size:12px;">Clear all</button>
+        <div class="column-toolbar">
+          <div class="column-dropdown">
+            <button id="columnToggle" class="column-toggle" type="button" aria-expanded="false">
+              Columns <span id="columnToggleCount">0/0</span>
+            </button>
+            <div id="columnPicker" class="column-menu" hidden>
+              <div class="column-actions">
+                <button id="selectAllColumns" type="button" class="ghost" style="padding:8px 10px; font-size:12px;">Select all</button>
+                <button id="clearAllColumns" type="button" class="ghost" style="padding:8px 10px; font-size:12px;">Clear all</button>
+              </div>
             </div>
           </div>
+          <div id="comparisonDates" class="comparison-dates" hidden></div>
         </div>
 
         <div class="table-wrap">
@@ -440,11 +505,15 @@
       const uploadHistoryFilter = document.getElementById('uploadHistoryFilter');
       const comparisonPeriodSelect = document.getElementById('comparisonPeriodSelect');
       const comparisonMetricSelect = document.getElementById('comparisonMetricSelect');
+      const comparisonSortField = document.getElementById('comparisonSortField');
+      const comparisonSortSelect = document.getElementById('comparisonSortSelect');
       const columnPicker = document.getElementById('columnPicker');
       const columnToggle = document.getElementById('columnToggle');
       const columnToggleCount = document.getElementById('columnToggleCount');
+      const comparisonDates = document.getElementById('comparisonDates');
       const selectAllColumnsButton = document.getElementById('selectAllColumns');
       const clearAllColumnsButton = document.getElementById('clearAllColumns');
+      let previousSelectedComparisonMetrics = Array.from(comparisonMetricSelect.selectedOptions).map((option) => option.value);
 
       const allColumns = [
         { key: 'site', label: 'Site' },
@@ -715,6 +784,31 @@
         return `${day}/${month}/${year}`;
       }
 
+      function getIsoWeekNumber(dateValue) {
+        const date = parseDateValue(dateValue);
+        if (!date) {
+          return null;
+        }
+
+        const utcDate = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+        const dayOfWeek = utcDate.getUTCDay() || 7;
+        utcDate.setUTCDate(utcDate.getUTCDate() + 4 - dayOfWeek);
+        const yearStart = new Date(Date.UTC(utcDate.getUTCFullYear(), 0, 1));
+        return Math.ceil((((utcDate - yearStart) / 86400000) + 1) / 7);
+      }
+
+      function updateComparisonDates() {
+        const period = comparisonPeriodSelect.value;
+        const activeDate = getActiveSnapshotDate();
+        const previousDate = activeDate ? getPreviousSnapshotDate(activeDate, period) : null;
+        const isVisible = period !== 'none' && activeDate && previousDate;
+        comparisonDates.hidden = !isVisible;
+        comparisonSortField.hidden = period === 'none';
+        comparisonDates.textContent = isVisible
+          ? `${formatDisplayDate(previousDate)} VS ${formatDisplayDate(activeDate)}`
+          : '';
+      }
+
       function getSnapshotDateForRow(row) {
         return parseDateValue(row.snapshot_date || row.update_time || row.upload_time);
       }
@@ -861,6 +955,29 @@
         return selected.length ? selected : ['running_hours'];
       }
 
+      function keepOneComparisonMetric(preferNewSelection = false) {
+        let selectedOptions = Array.from(comparisonMetricSelect.selectedOptions);
+        if (!selectedOptions.length) {
+          const fallbackMetric = previousSelectedComparisonMetrics[0] || comparisonMetricSelect.options[0].value;
+          const fallbackOption = Array.from(comparisonMetricSelect.options)
+            .find((option) => option.value === fallbackMetric);
+          if (fallbackOption) {
+            fallbackOption.selected = true;
+            selectedOptions = [fallbackOption];
+          }
+        }
+        if (selectedOptions.length > 1) {
+          const newlySelected = preferNewSelection
+            ? selectedOptions.find((option) => !previousSelectedComparisonMetrics.includes(option.value))
+            : null;
+          const metricToKeep = newlySelected || selectedOptions[0];
+          selectedOptions.forEach((option) => {
+            option.selected = option.value === metricToKeep.value;
+          });
+        }
+        previousSelectedComparisonMetrics = Array.from(comparisonMetricSelect.selectedOptions).map((option) => option.value);
+      }
+
       function renderTable(container, rows, columns) {
         if (!rows || rows.length === 0) {
           container.innerHTML = '<div class="muted" style="padding:18px;">No data available.</div>';
@@ -887,6 +1004,24 @@
           };
         });
 
+        if (period !== 'none') {
+          const sortDirection = comparisonSortSelect.value === 'asc' ? 1 : -1;
+          const sortMetricKey = comparisonMetrics[0];
+          rowsWithDelta.sort((rowA, rowB) => {
+            const getSortVariance = (row) => {
+              const value = row[`comparison_delta_${sortMetricKey}`];
+              return value !== null && value !== undefined && Number.isFinite(Number(value))
+                ? Number(value)
+                : null;
+            };
+            const varianceA = getSortVariance(rowA);
+            const varianceB = getSortVariance(rowB);
+            if (varianceA === null) return varianceB === null ? 0 : 1;
+            if (varianceB === null) return -1;
+            return (varianceA - varianceB) * sortDirection;
+          });
+        }
+
         const tableColumns = [...columns].filter((column) => {
           const key = typeof column === 'string' ? column : column.key;
           return !key.startsWith('comparison_') && key !== 'snapshot_date';
@@ -894,9 +1029,10 @@
 
         if (period !== 'none') {
           const activeSnapshotDate = getActiveSnapshotDate();
+          const comparableMetricKeys = ['running_hours', 'num_starts'];
           const filteredColumns = tableColumns.filter((column) => {
             const key = typeof column === 'string' ? column : column.key;
-            return !comparisonMetrics.includes(key);
+            return !comparableMetricKeys.includes(key);
           });
 
           let insertionIndex = filteredColumns.length;
@@ -909,17 +1045,21 @@
             .sort((a, b) => a - b)[0];
 
           if (selectedMetricIndex !== undefined) {
-            insertionIndex = selectedMetricIndex;
+            insertionIndex = tableColumns
+              .slice(0, selectedMetricIndex)
+              .filter((column) => {
+                const key = typeof column === 'string' ? column : column.key;
+                return !comparableMetricKeys.includes(key);
+              }).length;
           }
 
           const comparisonBlocks = [];
           comparisonMetrics.forEach((metricKey) => {
-            const metricLabel = getMetricLabel(metricKey);
             const previousSnapshotDate = activeSnapshotDate ? getPreviousSnapshotDate(activeSnapshotDate, period) : null;
             comparisonBlocks.push(
-              { key: `comparison_previous_${metricKey}`, label: `${previousSnapshotDate ? formatDisplayDate(previousSnapshotDate) : 'Prev'} ${metricLabel}` },
+              { key: `comparison_previous_${metricKey}`, label: `WEEK ${getIsoWeekNumber(previousSnapshotDate) ?? '-'}` },
               { key: `comparison_delta_${metricKey}`, label: getComparisonLabel(metricKey) },
-              { key: `comparison_current_${metricKey}`, label: `${activeSnapshotDate ? formatDisplayDate(activeSnapshotDate) : 'Current'} ${metricLabel}` },
+              { key: `comparison_current_${metricKey}`, label: `WEEK ${getIsoWeekNumber(activeSnapshotDate) ?? '-'}` },
             );
           });
 
@@ -1051,6 +1191,7 @@
       }
 
       function renderGeneratorTable() {
+        updateComparisonDates();
         const searchTerm = normalizeText(generatorSearch.value);
         const selectedSite = siteSelect.value;
         const selectedReg = regFilter.value;
@@ -1303,8 +1444,24 @@
 
       regFilter.addEventListener('change', renderGeneratorTable);
       generatorSearch.addEventListener('input', renderGeneratorTable);
-      comparisonPeriodSelect.addEventListener('change', renderGeneratorTable);
-      comparisonMetricSelect.addEventListener('change', renderGeneratorTable);
+      comparisonPeriodSelect.addEventListener('change', () => {
+        if (comparisonPeriodSelect.value !== 'none') {
+          keepOneComparisonMetric();
+        }
+        renderGeneratorTable();
+      });
+      comparisonMetricSelect.addEventListener('change', () => {
+        if (comparisonPeriodSelect.value !== 'none') {
+          keepOneComparisonMetric(true);
+        } else {
+          previousSelectedComparisonMetrics = Array.from(comparisonMetricSelect.selectedOptions).map((option) => option.value);
+        }
+        renderGeneratorTable();
+      });
+      comparisonSortSelect.addEventListener('change', () => {
+        keepOneComparisonMetric();
+        renderGeneratorTable();
+      });
       updateDateFilter.addEventListener('change', renderGeneratorTable);
       uploadDateFilter.addEventListener('change', renderGeneratorTable);
       snapshotDateFilter.addEventListener('change', renderGeneratorTable);
