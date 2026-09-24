@@ -3,7 +3,7 @@ import logging
 import math
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import date, datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -246,6 +246,162 @@ def list_all_generators(db: Session = Depends(get_db)):
         }
         for generator in generators
     ]
+
+
+@app.get("/analytics/generator-trends")
+def generator_trends(
+    metric: str = "running_hours",
+    granularity: str = "month",
+    reference_date: date | None = None,
+    comparison_period: str = "none",
+    db: Session = Depends(get_db),
+):
+    metric_labels = {
+        "running_hours": "Running hours",
+        "num_starts": "Number of starts",
+    }
+    if metric not in metric_labels:
+        raise HTTPException(status_code=400, detail="Unsupported metric")
+    if granularity not in {"month", "week"}:
+        raise HTTPException(status_code=400, detail="Granularity must be month or week")
+    if comparison_period not in {"none", "DoD", "WoW", "6DayBack", "MoM"}:
+        raise HTTPException(status_code=400, detail="Unsupported comparison period")
+
+    records = db.query(
+        Generator.generator_id,
+        Generator.site_id,
+        Site.site_name,
+        Generator.router_ip,
+        Generator.reg,
+        Generator.ip,
+        Generator.snapshot_date,
+        getattr(Generator, metric),
+    ).join(Site, Site.site_id == Generator.site_id).filter(Generator.snapshot_date.isnot(None)).all()
+
+    columns = ["generator_id", "site_id", "site_name", "router_ip", "reg", "ip", "snapshot_date", metric]
+    df = pd.DataFrame(records, columns=columns)
+    if df.empty:
+        return {
+            "metric": metric,
+            "metric_label": metric_labels[metric],
+            "granularity": granularity,
+            "reference_date": None,
+            "labels": [],
+            "sites": [],
+            "total": [],
+            "accumulated": [],
+            "comparison": None,
+        }
+
+    df["snapshot_date"] = pd.to_datetime(df["snapshot_date"], errors="coerce")
+    df[metric] = pd.to_numeric(df[metric], errors="coerce")
+    df = df.dropna(subset=["snapshot_date", metric])
+    if df.empty:
+        return {
+            "metric": metric,
+            "metric_label": metric_labels[metric],
+            "granularity": granularity,
+            "reference_date": None,
+            "labels": [],
+            "sites": [],
+            "total": [],
+            "accumulated": [],
+            "comparison": None,
+        }
+
+    identity_columns = ["site_id", "router_ip", "reg", "ip"]
+    df["device_key"] = df[identity_columns].fillna("").astype(str).agg("|".join, axis=1)
+    df = df.sort_values(["snapshot_date", "generator_id"])
+    df = df.drop_duplicates(subset=[*identity_columns, "snapshot_date"], keep="last")
+    effective_reference = pd.Timestamp(reference_date) if reference_date else df["snapshot_date"].max()
+    df = df[df["snapshot_date"] <= effective_reference].copy()
+    if df.empty:
+        return {
+            "metric": metric,
+            "metric_label": metric_labels[metric],
+            "granularity": granularity,
+            "reference_date": effective_reference.date().isoformat(),
+            "labels": [],
+            "sites": [],
+            "total": [],
+            "accumulated": [],
+            "comparison": None,
+        }
+
+    df = df.sort_values(["device_key", "snapshot_date"])
+    reading_delta = df.groupby("device_key")[metric].diff()
+    # If a cumulative counter was reset, count the new reading as usage since reset.
+    df["period_value"] = reading_delta.where(reading_delta >= 0, df[metric]).fillna(0)
+
+    if granularity == "month":
+        df["period_start"] = df["snapshot_date"].dt.to_period("M").dt.start_time
+        label_for_period = lambda value: value.strftime("%b-%y")
+    else:
+        df["period_start"] = (
+            df["snapshot_date"] - pd.to_timedelta(df["snapshot_date"].dt.weekday, unit="D")
+        ).dt.normalize()
+        label_for_period = lambda value: f"Week {value.isocalendar().week} ({value.strftime('%Y')})"
+
+    grouped = df.groupby(["period_start", "site_name"])["period_value"].sum().unstack(fill_value=0).sort_index()
+    site_names = sorted(grouped.columns.tolist())
+    grouped = grouped.reindex(columns=site_names, fill_value=0)
+    total_series = grouped.sum(axis=1)
+    accumulated_series = total_series.cumsum()
+    visible_periods = grouped.index[-12:]
+
+    def number_list(series, index):
+        return [round(float(value), 2) for value in series.reindex(index, fill_value=0).tolist()]
+
+    comparison = None
+    if comparison_period != "none":
+        active_snapshot = df["snapshot_date"].max()
+        if comparison_period == "DoD":
+            previous_target = active_snapshot - pd.Timedelta(days=1)
+        elif comparison_period == "WoW":
+            previous_target = active_snapshot - pd.Timedelta(days=7)
+        elif comparison_period == "6DayBack":
+            previous_target = active_snapshot - pd.Timedelta(days=6)
+        else:
+            previous_target = active_snapshot - pd.DateOffset(months=1)
+
+        def values_at_snapshot(target):
+            eligible = df[df["snapshot_date"] <= target]
+            if eligible.empty:
+                return None, {}
+            snapshot = eligible["snapshot_date"].max()
+            values = (
+                eligible[eligible["snapshot_date"] == snapshot]
+                .groupby("site_name")[metric]
+                .sum()
+                .to_dict()
+            )
+            return snapshot, values
+
+        current_date, current_values = values_at_snapshot(active_snapshot)
+        previous_date, previous_values = values_at_snapshot(previous_target)
+        comparison_sites = sorted(set(current_values) | set(previous_values))
+        comparison = {
+            "current_date": current_date.date().isoformat() if current_date is not None else None,
+            "previous_date": previous_date.date().isoformat() if previous_date is not None else None,
+            "sites": comparison_sites,
+            "current": [round(float(current_values.get(site, 0)), 2) for site in comparison_sites],
+            "previous": [round(float(previous_values.get(site, 0)), 2) for site in comparison_sites],
+        }
+
+    return {
+        "metric": metric,
+        "metric_label": metric_labels[metric],
+        "granularity": granularity,
+        "reference_date": effective_reference.date().isoformat(),
+        "labels": [label_for_period(value) for value in visible_periods],
+        "sites": [
+            {"name": site, "values": number_list(grouped[site], visible_periods)}
+            for site in site_names
+        ],
+        "total": number_list(total_series, visible_periods),
+        "accumulated": number_list(accumulated_series, visible_periods),
+        "comparison": comparison,
+    }
 
 
 @app.get("/sites/{site_id}/generators")

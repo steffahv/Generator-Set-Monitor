@@ -49,6 +49,16 @@
         gap: 20px;
       }
 
+      .header-shortcut {
+        width: auto;
+        margin-left: auto;
+        padding: 11px 16px;
+        border: 1px solid rgba(255, 255, 255, 0.35);
+        background: #e8f0ff;
+        color: #123b82;
+        white-space: nowrap;
+      }
+
       .header-logo {
         display: block;
         flex: 0 0 auto;
@@ -332,6 +342,50 @@
         margin-bottom: 12px;
       }
 
+      .chart-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr);
+        gap: 18px;
+      }
+
+      .chart-card {
+        min-width: 0;
+        padding: 18px;
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        background: white;
+      }
+
+      .chart-card h3 {
+        margin: 0;
+        color: var(--navy);
+        font-size: 18px;
+      }
+
+      .chart-card-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+
+      .chart-download {
+        width: auto;
+        padding: 8px 12px;
+        font-size: 12px;
+      }
+
+      .chart-container {
+        position: relative;
+        height: 380px;
+      }
+
+      .chart-status {
+        min-height: 22px;
+        margin: 0 0 12px;
+      }
+
       @media (max-width: 760px) {
         .upload-row,
         .toolbar {
@@ -340,6 +394,7 @@
 
         .header-brand {
           gap: 14px;
+          flex-wrap: wrap;
         }
 
         .header-logo {
@@ -359,10 +414,12 @@
         <div class="header-brand">
           <img class="header-logo" src="/images/yofc_logo.png" alt="YOFC logo" />
           <h1>Generator Set Monitor</h1>
+          <button id="openAnalyticsButton" class="header-shortcut" type="button">Charts &amp; comparison</button>
         </div>
         <div class="subtitle">Upload files, inspect the raw data, and review the structured generator records by site.</div>
       </header>
 
+      <div id="mainView">
       <section class="section">
         <div class="panel-header">
           <h2 class="section-title" style="margin:0;">Generators</h2>
@@ -484,10 +541,82 @@
           <div id="uploadsTableContainer"></div>
         </div>
       </section>
+      </div>
+
+      <section id="analyticsView" class="section" hidden>
+        <div class="panel-header">
+          <h2 class="section-title" style="margin:0;">Historical charts</h2>
+          <button id="backToMainButton" class="secondary" type="button" style="width:auto;">Back to dashboard</button>
+        </div>
+
+        <div class="toolbar">
+          <div class="field">
+            <label for="analyticsMetric">Metric</label>
+            <select id="analyticsMetric">
+              <option value="running_hours">Running hours</option>
+              <option value="num_starts">Number of starts</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="analyticsGranularity">Group by</label>
+            <select id="analyticsGranularity">
+              <option value="month">Month</option>
+              <option value="week">Week</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="analyticsComparison">Compare snapshots</label>
+            <select id="analyticsComparison">
+              <option value="none">No comparison</option>
+              <option value="DoD">DoD</option>
+              <option value="WoW">WoW</option>
+              <option value="6DayBack">6D Back</option>
+              <option value="MoM">MoM</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="analyticsReferenceDate">Reference date</label>
+            <input id="analyticsReferenceDate" type="date" />
+          </div>
+          <div class="field">
+            <label>&nbsp;</label>
+            <button id="refreshAnalyticsButton" class="secondary" type="button">Refresh charts</button>
+          </div>
+        </div>
+
+        <p id="analyticsStatus" class="muted chart-status" aria-live="polite"></p>
+        <div class="chart-grid">
+          <article class="chart-card">
+            <div class="chart-card-header">
+              <h3 id="trendChartTitle">Generator running hours by month</h3>
+              <button id="downloadTrendChart" class="chart-download secondary" type="button">Download PNG</button>
+            </div>
+            <div class="chart-container"><canvas id="trendChart"></canvas></div>
+          </article>
+          <article id="comparisonChartCard" class="chart-card" hidden>
+            <div class="chart-card-header">
+              <h3 id="comparisonChartTitle">Snapshot comparison</h3>
+              <button id="downloadComparisonChart" class="chart-download secondary" type="button">Download PNG</button>
+            </div>
+            <div class="chart-container"><canvas id="comparisonChart"></canvas></div>
+          </article>
+        </div>
+      </section>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script>
       const API_BASE = window.location.origin;
+      const mainView = document.getElementById('mainView');
+      const analyticsView = document.getElementById('analyticsView');
+      const analyticsMetric = document.getElementById('analyticsMetric');
+      const analyticsGranularity = document.getElementById('analyticsGranularity');
+      const analyticsComparison = document.getElementById('analyticsComparison');
+      const analyticsReferenceDate = document.getElementById('analyticsReferenceDate');
+      const analyticsStatus = document.getElementById('analyticsStatus');
+      const comparisonChartCard = document.getElementById('comparisonChartCard');
+      let trendChartInstance = null;
+      let comparisonChartInstance = null;
       let allGenerators = [];
 
       const uploadButton = document.getElementById('uploadButton');
@@ -514,6 +643,162 @@
       const selectAllColumnsButton = document.getElementById('selectAllColumns');
       const clearAllColumnsButton = document.getElementById('clearAllColumns');
       let previousSelectedComparisonMetrics = Array.from(comparisonMetricSelect.selectedOptions).map((option) => option.value);
+
+      function formatChartDate(value) {
+        if (!value) return '';
+        const date = parseDateValue(value);
+        return date ? formatDisplayDate(date) : value;
+      }
+
+      function renderTrendChart(data) {
+        const palette = ['#f97316', '#0ea5e9', '#65a30d', '#a34116', '#0369a1', '#16a34a', '#7c3aed', '#db2777'];
+        const datasets = data.sites.map((site, index) => ({
+          label: site.name,
+          data: site.values,
+          borderColor: palette[index % palette.length],
+          backgroundColor: palette[index % palette.length],
+          tension: 0.25,
+          pointRadius: 3,
+          borderWidth: 2,
+        }));
+        datasets.push({
+          label: 'GE total',
+          data: data.total,
+          borderColor: '#0369a1',
+          backgroundColor: '#0369a1',
+          tension: 0.25,
+          pointRadius: 3,
+          borderWidth: 3,
+        });
+        datasets.push({
+          label: 'Accumulated',
+          data: data.accumulated,
+          borderColor: '#166534',
+          backgroundColor: '#166534',
+          tension: 0.25,
+          pointRadius: 3,
+          borderWidth: 3,
+          borderDash: [6, 4],
+        });
+
+        if (trendChartInstance) trendChartInstance.destroy();
+        trendChartInstance = new Chart(document.getElementById('trendChart'), {
+          type: 'line',
+          data: { labels: data.labels, datasets },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: { legend: { position: 'bottom' } },
+            scales: {
+              y: { beginAtZero: true, title: { display: true, text: data.metric_label } },
+              x: { grid: { display: false } },
+            },
+          },
+        });
+      }
+
+      function renderComparisonChart(comparison, metricLabel) {
+        if (comparisonChartInstance) {
+          comparisonChartInstance.destroy();
+          comparisonChartInstance = null;
+        }
+
+        if (!comparison || !comparison.previous_date || !comparison.sites.length) {
+          comparisonChartCard.hidden = true;
+          return false;
+        }
+
+        comparisonChartCard.hidden = false;
+        document.getElementById('comparisonChartTitle').textContent = `${metricLabel}: ${formatChartDate(comparison.previous_date)} vs ${formatChartDate(comparison.current_date)}`;
+        comparisonChartInstance = new Chart(document.getElementById('comparisonChart'), {
+          type: 'bar',
+          data: {
+            labels: comparison.sites,
+            datasets: [
+              {
+                label: `Previous (${formatChartDate(comparison.previous_date)})`,
+                data: comparison.previous,
+                backgroundColor: '#93c5fd',
+              },
+              {
+                label: `Current (${formatChartDate(comparison.current_date)})`,
+                data: comparison.current,
+                backgroundColor: '#2563eb',
+              },
+            ],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { position: 'bottom' } },
+            scales: {
+              y: { beginAtZero: true, title: { display: true, text: metricLabel } },
+              x: { grid: { display: false } },
+            },
+          },
+        });
+        return true;
+      }
+
+      async function loadAnalyticsCharts() {
+        if (typeof Chart === 'undefined') {
+          analyticsStatus.textContent = 'Chart.js could not be loaded. Check the network connection and try again.';
+          return;
+        }
+
+        analyticsStatus.textContent = 'Loading chart data…';
+        const params = new URLSearchParams({
+          metric: analyticsMetric.value,
+          granularity: analyticsGranularity.value,
+          comparison_period: analyticsComparison.value,
+        });
+        if (analyticsReferenceDate.value) {
+          params.set('reference_date', analyticsReferenceDate.value);
+        }
+
+        try {
+          const data = await fetchJson(`${API_BASE}/analytics/generator-trends?${params.toString()}`);
+          const granularityLabel = analyticsGranularity.value === 'month' ? 'Month' : 'Week';
+          document.getElementById('trendChartTitle').textContent = `GE ${data.metric_label} by ${granularityLabel}`;
+
+          if (!data.labels.length) {
+            if (trendChartInstance) {
+              trendChartInstance.destroy();
+              trendChartInstance = null;
+            }
+            comparisonChartCard.hidden = true;
+            analyticsStatus.textContent = 'No historical snapshot data is available for this selection.';
+            return;
+          }
+
+          renderTrendChart(data);
+          const comparisonVisible = analyticsComparison.value !== 'none'
+            ? renderComparisonChart(data.comparison, data.metric_label)
+            : (comparisonChartCard.hidden = true, false);
+          analyticsStatus.textContent = `Showing the latest ${data.labels.length} ${granularityLabel.toLowerCase()} periods through ${formatChartDate(data.reference_date)}. Period values are calculated from changes in cumulative readings.`;
+          if (analyticsComparison.value !== 'none' && !comparisonVisible) {
+            analyticsStatus.textContent += ' A previous snapshot was not available for the selected comparison.';
+          }
+        } catch (error) {
+          analyticsStatus.textContent = `Could not load chart data: ${error.message}`;
+          comparisonChartCard.hidden = true;
+        }
+      }
+
+      function showAnalyticsView(showAnalytics) {
+        mainView.hidden = showAnalytics;
+        analyticsView.hidden = !showAnalytics;
+        if (showAnalytics) loadAnalyticsCharts();
+      }
+
+      function downloadChartImage(chart, filename) {
+        if (!chart) return;
+        const link = document.createElement('a');
+        link.href = chart.toBase64Image('image/png', 1);
+        link.download = filename;
+        link.click();
+      }
 
       const allColumns = [
         { key: 'site', label: 'Site' },
@@ -1466,6 +1751,21 @@
       uploadDateFilter.addEventListener('change', renderGeneratorTable);
       snapshotDateFilter.addEventListener('change', renderGeneratorTable);
       uploadHistoryFilter.addEventListener('change', loadUploads);
+
+      document.getElementById('openAnalyticsButton').addEventListener('click', () => showAnalyticsView(true));
+      document.getElementById('backToMainButton').addEventListener('click', () => showAnalyticsView(false));
+      document.getElementById('refreshAnalyticsButton').addEventListener('click', loadAnalyticsCharts);
+      document.getElementById('downloadTrendChart').addEventListener('click', () => {
+        const metric = analyticsMetric.value === 'running_hours' ? 'running-hours' : 'number-of-starts';
+        downloadChartImage(trendChartInstance, `generator-${metric}-${analyticsGranularity.value}.png`);
+      });
+      document.getElementById('downloadComparisonChart').addEventListener('click', () => {
+        downloadChartImage(comparisonChartInstance, `generator-comparison-${analyticsMetric.value}.png`);
+      });
+      analyticsMetric.addEventListener('change', loadAnalyticsCharts);
+      analyticsGranularity.addEventListener('change', loadAnalyticsCharts);
+      analyticsComparison.addEventListener('change', loadAnalyticsCharts);
+      analyticsReferenceDate.addEventListener('change', loadAnalyticsCharts);
 
       async function init() {
         renderColumnPicker();
