@@ -70,9 +70,17 @@ Key backend routes:
 - `GET /sites`
 - `POST /sites`
 - `GET /generators`
+- `GET /analytics/generator-trends`
 - `POST /upload-excel`
 - `GET /uploads`
 - `DELETE /uploads/{id}`
+
+Analytics query parameters:
+
+- `metric`: `running_hours` or `num_starts`
+- `granularity`: `month` or `week`
+- `reference_date`: optional `YYYY-MM-DD`; defaults to the latest snapshot
+- `comparison_period`: `none`, `DoD`, `WoW`, `6DayBack`, or `MoM`
 
 ## Frontend
 
@@ -84,7 +92,10 @@ The app serves the dashboard at `/` and includes:
 - selected metric controls
 - date-based snapshot filters
 - dynamic column visibility management
+- historical monthly and weekly charts by site, with totals, accumulated values, snapshot comparison, and PNG export
 - compact grid presentation for operational review
+
+Open the charts view from the header shortcut. The backend aggregates chart data with pandas; the frontend renders it with Chart.js from a CDN. See [docs/CHARTS.md](docs/CHARTS.md) for the data rules and implementation details.
 
 ## Project structure
 
@@ -94,6 +105,7 @@ The app serves the dashboard at `/` and includes:
 - `app/config.py` — environment settings
 - `app/mapping.py` — header/value normalization rules
 - `public/index.html` — dashboard UI and client-side filtering/rendering
+- `docs/CHARTS.md` — charts feature design, API contract, calculations, and rendering behavior
 - `docker-compose.yml` — local PostgreSQL container config
 - `Dockerfile` — application container definition
 - `requirements.txt` — Python dependencies

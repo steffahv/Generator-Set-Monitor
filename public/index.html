@@ -231,6 +231,32 @@
         white-space: nowrap;
       }
 
+      .variance-header-content {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        min-width: 70px;
+      }
+
+      .variance-sort-button {
+        width: 26px;
+        min-width: 26px;
+        padding: 3px;
+        border: 1px solid rgba(15, 23, 42, 0.16);
+        border-radius: 5px;
+        background: rgba(255, 255, 255, 0.72);
+        color: #243b63;
+        font-size: 16px;
+        line-height: 1;
+      }
+
+      .variance-sort-button[aria-pressed="true"] {
+        border-color: #1d4ed8;
+        background: #1d4ed8;
+        color: white;
+      }
+
       .column-toggle {
         display: flex;
         align-items: center;
@@ -465,14 +491,6 @@
             </select>
           </div>
 
-          <div id="comparisonSortField" class="field" hidden>
-            <label for="comparisonSortSelect">Sort by VAR</label>
-            <select id="comparisonSortSelect">
-              <option value="desc">DESC</option>
-              <option value="asc">ASC</option>
-            </select>
-          </div>
-
           <div class="field">
             <label for="updateDateFilter">Update time</label>
             <input id="updateDateFilter" type="date" />
@@ -634,15 +652,13 @@
       const uploadHistoryFilter = document.getElementById('uploadHistoryFilter');
       const comparisonPeriodSelect = document.getElementById('comparisonPeriodSelect');
       const comparisonMetricSelect = document.getElementById('comparisonMetricSelect');
-      const comparisonSortField = document.getElementById('comparisonSortField');
-      const comparisonSortSelect = document.getElementById('comparisonSortSelect');
       const columnPicker = document.getElementById('columnPicker');
       const columnToggle = document.getElementById('columnToggle');
       const columnToggleCount = document.getElementById('columnToggleCount');
       const comparisonDates = document.getElementById('comparisonDates');
       const selectAllColumnsButton = document.getElementById('selectAllColumns');
       const clearAllColumnsButton = document.getElementById('clearAllColumns');
-      let previousSelectedComparisonMetrics = Array.from(comparisonMetricSelect.selectedOptions).map((option) => option.value);
+      let activeComparisonSort = null;
 
       function formatChartDate(value) {
         if (!value) return '';
@@ -1088,7 +1104,6 @@
         const previousDate = activeDate ? getPreviousSnapshotDate(activeDate, period) : null;
         const isVisible = period !== 'none' && activeDate && previousDate;
         comparisonDates.hidden = !isVisible;
-        comparisonSortField.hidden = period === 'none';
         comparisonDates.textContent = isVisible
           ? `${formatDisplayDate(previousDate)} VS ${formatDisplayDate(activeDate)}`
           : '';
@@ -1240,27 +1255,14 @@
         return selected.length ? selected : ['running_hours'];
       }
 
-      function keepOneComparisonMetric(preferNewSelection = false) {
-        let selectedOptions = Array.from(comparisonMetricSelect.selectedOptions);
-        if (!selectedOptions.length) {
-          const fallbackMetric = previousSelectedComparisonMetrics[0] || comparisonMetricSelect.options[0].value;
-          const fallbackOption = Array.from(comparisonMetricSelect.options)
-            .find((option) => option.value === fallbackMetric);
-          if (fallbackOption) {
-            fallbackOption.selected = true;
-            selectedOptions = [fallbackOption];
-          }
+      function toggleComparisonSort(metricKey) {
+        if (!activeComparisonSort || activeComparisonSort.metricKey !== metricKey) {
+          activeComparisonSort = { metricKey, direction: 'desc' };
+        } else if (activeComparisonSort.direction === 'desc') {
+          activeComparisonSort = { metricKey, direction: 'asc' };
+        } else {
+          activeComparisonSort = null;
         }
-        if (selectedOptions.length > 1) {
-          const newlySelected = preferNewSelection
-            ? selectedOptions.find((option) => !previousSelectedComparisonMetrics.includes(option.value))
-            : null;
-          const metricToKeep = newlySelected || selectedOptions[0];
-          selectedOptions.forEach((option) => {
-            option.selected = option.value === metricToKeep.value;
-          });
-        }
-        previousSelectedComparisonMetrics = Array.from(comparisonMetricSelect.selectedOptions).map((option) => option.value);
       }
 
       function renderTable(container, rows, columns) {
@@ -1289,9 +1291,11 @@
           };
         });
 
-        if (period !== 'none') {
-          const sortDirection = comparisonSortSelect.value === 'asc' ? 1 : -1;
-          const sortMetricKey = comparisonMetrics[0];
+        if (period !== 'none' && activeComparisonSort
+            && comparisonMetrics.includes(activeComparisonSort.metricKey)) {
+          const sortDirection = activeComparisonSort.direction === 'asc' ? 1 : -1;
+          const sortMetricKey = activeComparisonSort.metricKey;
+          const originalPositions = new Map(rowsWithDelta.map((row, index) => [row, index]));
           rowsWithDelta.sort((rowA, rowB) => {
             const getSortVariance = (row) => {
               const value = row[`comparison_delta_${sortMetricKey}`];
@@ -1303,7 +1307,8 @@
             const varianceB = getSortVariance(rowB);
             if (varianceA === null) return varianceB === null ? 0 : 1;
             if (varianceB === null) return -1;
-            return (varianceA - varianceB) * sortDirection;
+            return (varianceA - varianceB) * sortDirection
+              || originalPositions.get(rowA) - originalPositions.get(rowB);
           });
         }
 
@@ -1368,9 +1373,36 @@
             th.style.fontWeight = '800';
             th.style.borderLeft = '2px solid #7aa2ff';
           }
-          th.textContent = isComparisonColumn
-            ? (column.label || column)
-            : getColumnHeaderLabel(columnKey, column.label || column);
+          if (isComparisonColumn && columnKey.startsWith('comparison_delta_')) {
+            const metricKey = columnKey.replace('comparison_delta_', '');
+            const headerContent = document.createElement('div');
+            headerContent.className = 'variance-header-content';
+            const label = document.createElement('span');
+            label.textContent = column.label || column;
+            const sortButton = document.createElement('button');
+            const isActiveSort = activeComparisonSort?.metricKey === metricKey;
+            sortButton.type = 'button';
+            sortButton.className = 'variance-sort-button';
+            sortButton.textContent = isActiveSort
+              ? (activeComparisonSort.direction === 'desc' ? '↓' : '↑')
+              : '↕';
+            sortButton.title = isActiveSort
+              ? `${activeComparisonSort.direction.toUpperCase()} by ${getMetricLabel(metricKey)} VAR; click to change order`
+              : `Sort by ${getMetricLabel(metricKey)} VAR`;
+            sortButton.setAttribute('aria-label', sortButton.title);
+            sortButton.setAttribute('aria-pressed', String(Boolean(isActiveSort)));
+            sortButton.addEventListener('click', (event) => {
+              event.stopPropagation();
+              toggleComparisonSort(metricKey);
+              renderGeneratorTable();
+            });
+            headerContent.append(label, sortButton);
+            th.appendChild(headerContent);
+          } else {
+            th.textContent = isComparisonColumn
+              ? (column.label || column)
+              : getColumnHeaderLabel(columnKey, column.label || column);
+          }
           headerRow.appendChild(th);
         });
         thead.appendChild(headerRow);
@@ -1730,21 +1762,14 @@
       regFilter.addEventListener('change', renderGeneratorTable);
       generatorSearch.addEventListener('input', renderGeneratorTable);
       comparisonPeriodSelect.addEventListener('change', () => {
-        if (comparisonPeriodSelect.value !== 'none') {
-          keepOneComparisonMetric();
-        }
+        if (comparisonPeriodSelect.value === 'none') activeComparisonSort = null;
         renderGeneratorTable();
       });
       comparisonMetricSelect.addEventListener('change', () => {
-        if (comparisonPeriodSelect.value !== 'none') {
-          keepOneComparisonMetric(true);
-        } else {
-          previousSelectedComparisonMetrics = Array.from(comparisonMetricSelect.selectedOptions).map((option) => option.value);
+        const selectedMetrics = Array.from(comparisonMetricSelect.selectedOptions).map((option) => option.value);
+        if (activeComparisonSort && !selectedMetrics.includes(activeComparisonSort.metricKey)) {
+          activeComparisonSort = null;
         }
-        renderGeneratorTable();
-      });
-      comparisonSortSelect.addEventListener('change', () => {
-        keepOneComparisonMetric();
         renderGeneratorTable();
       });
       updateDateFilter.addEventListener('change', renderGeneratorTable);
