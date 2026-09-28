@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, Float, Text, ForeignKey, Date
+from sqlalchemy import Column, Integer, String, DateTime, Float, Text, ForeignKey, Date, LargeBinary
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -13,6 +13,7 @@ class ExcelUpload(Base):
     row_count = Column(Integer, nullable=False, default=0)
     status = Column(String(50), nullable=False, default="uploaded")
     snapshot_date = Column(Date, nullable=True)
+    file_content = Column(LargeBinary, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 

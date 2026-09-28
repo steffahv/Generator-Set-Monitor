@@ -623,6 +623,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
     <script>
       const API_BASE = window.location.origin;
       const mainView = document.getElementById('mainView');
@@ -667,22 +668,25 @@
       }
 
       function renderTrendChart(data) {
+        if (typeof ChartDataLabels !== 'undefined') {
+          Chart.register(ChartDataLabels);
+        }
         const palette = ['#f97316', '#0ea5e9', '#65a30d', '#a34116', '#0369a1', '#16a34a', '#7c3aed', '#db2777'];
         const datasets = data.sites.map((site, index) => ({
           label: site.name,
           data: site.values,
           borderColor: palette[index % palette.length],
           backgroundColor: palette[index % palette.length],
-          tension: 0.25,
+          tension: 0.32,
           pointRadius: 3,
           borderWidth: 2,
         }));
         datasets.push({
-          label: 'GE total',
+          label: data.metric === 'running_hours' ? 'GE Total hours' : 'GE Total starts',
           data: data.total,
           borderColor: '#0369a1',
           backgroundColor: '#0369a1',
-          tension: 0.25,
+          tension: 0.32,
           pointRadius: 3,
           borderWidth: 3,
         });
@@ -691,9 +695,10 @@
           data: data.accumulated,
           borderColor: '#166534',
           backgroundColor: '#166534',
-          tension: 0.25,
+          tension: 0.32,
           pointRadius: 3,
           borderWidth: 3,
+          yAxisID: 'yAccumulated',
           borderDash: [6, 4],
         });
 
@@ -705,9 +710,46 @@
             responsive: true,
             maintainAspectRatio: false,
             interaction: { mode: 'index', intersect: false },
-            plugins: { legend: { position: 'bottom' } },
+            layout: { padding: { top: 24, right: 30 } },
+            plugins: {
+              legend: {
+                position: 'bottom',
+                labels: { boxWidth: 14, padding: 14, usePointStyle: true },
+              },
+              datalabels: {
+                display: (context) => Number(context.dataset.data[context.dataIndex]) !== 0 ? 'auto' : false,
+                align: 'top',
+                anchor: 'end',
+                clamp: true,
+                clip: false,
+                color: (context) => context.dataset.borderColor,
+                backgroundColor: 'rgba(255, 255, 255, 0.82)',
+                borderRadius: 3,
+                formatter: (value) => Number(value).toLocaleString('es-PE', {
+                  minimumFractionDigits: 1,
+                  maximumFractionDigits: 1,
+                }),
+                font: { size: 10, weight: 'bold' },
+                offset: 3,
+                padding: 2,
+                textStrokeColor: '#fff',
+                textStrokeWidth: 2,
+              },
+            },
             scales: {
-              y: { beginAtZero: true, title: { display: true, text: data.metric_label } },
+              y: {
+                beginAtZero: true,
+                grace: '8%',
+                position: 'left',
+                title: { display: true, text: data.metric_label },
+              },
+              yAccumulated: {
+                beginAtZero: true,
+                grace: '10%',
+                position: 'right',
+                grid: { drawOnChartArea: false },
+                title: { display: true, text: 'Accumulated' },
+              },
               x: { grid: { display: false } },
             },
           },
@@ -793,6 +835,9 @@
             ? renderComparisonChart(data.comparison, data.metric_label)
             : (comparisonChartCard.hidden = true, false);
           analyticsStatus.textContent = `Showing the latest ${data.labels.length} ${granularityLabel.toLowerCase()} periods through ${formatChartDate(data.reference_date)}. Period values are calculated from changes in cumulative readings.`;
+          if (data.baseline_cells_used) {
+            analyticsStatus.textContent += ` Historical baseline filled ${data.baseline_cells_used} region-period cells.`;
+          }
           if (analyticsComparison.value !== 'none' && !comparisonVisible) {
             analyticsStatus.textContent += ' A previous snapshot was not available for the selected comparison.';
           }
@@ -1650,6 +1695,7 @@
                 return `${day}/${month}/${year}`;
               })() : '',
               created_at: formatUploadDate(upload.created_at),
+              download_label: 'Download',
               actions: `delete-${upload.id}`,
             }));
 
@@ -1671,6 +1717,30 @@
             uploadColumns.forEach((column) => {
               const td = document.createElement('td');
               if (column.key === 'actions') {
+                const actionGroup = document.createElement('div');
+                actionGroup.style.display = 'flex';
+                actionGroup.style.alignItems = 'center';
+                actionGroup.style.gap = '8px';
+
+                const downloadLink = document.createElement('a');
+                downloadLink.href = `${API_BASE}/uploads/${row.id}/download`;
+                downloadLink.textContent = row.download_label;
+                downloadLink.className = 'ghost';
+                downloadLink.style.display = 'inline-block';
+                downloadLink.style.width = 'auto';
+                downloadLink.style.padding = '7px 12px';
+                downloadLink.style.borderRadius = '10px';
+                downloadLink.style.border = '1px solid var(--border)';
+                downloadLink.style.background = '#f3f6fb';
+                downloadLink.style.color = 'var(--navy)';
+                downloadLink.style.fontSize = '14px';
+                downloadLink.style.fontWeight = '700';
+                downloadLink.style.textDecoration = 'none';
+                if (!row.has_original_file) {
+                  downloadLink.title = 'The original file was not retained for this older upload; this downloads the stored rows as a reconstructed Excel workbook.';
+                }
+                actionGroup.appendChild(downloadLink);
+
                 const button = document.createElement('button');
                 button.type = 'button';
                 button.textContent = 'Delete';
@@ -1691,7 +1761,8 @@
                     uploadStatus.textContent = `Could not delete upload record: ${error.message}`;
                   }
                 });
-                td.appendChild(button);
+                actionGroup.appendChild(button);
+                td.appendChild(actionGroup);
               } else {
                 td.textContent = row[column.key] ?? '';
               }

@@ -30,7 +30,7 @@ The app follows a master/detail pattern:
 
 - `sites`: manual master registry of physical sites and router metadata
 - `generators`: operational generator records imported from uploaded files
-- `excel_uploads`: upload metadata and audit history
+- `excel_uploads`: upload metadata, audit history, and retained source files
 - `raw_data_rows`: raw row payloads as saved from each file
 - `rectifiers`: defined for future extension, not the active functional scope
 
@@ -45,7 +45,7 @@ Important operational rule:
 ### Import flow
 
 1. The user uploads an Excel or CSV file from the UI.
-2. Upload metadata is stored in `excel_uploads`.
+2. Upload metadata and original file bytes are stored in `excel_uploads`.
 3. Each row is kept in `raw_data_rows` as raw JSON for traceability.
 4. Headers and values are normalized before persistence.
 5. Rows are matched to `sites` via `router_ip`.
@@ -73,6 +73,7 @@ Key backend routes:
 - `GET /analytics/generator-trends`
 - `POST /upload-excel`
 - `GET /uploads`
+- `GET /uploads/{id}/download` — returns the original for new uploads, or a reconstructed `.xlsx` workbook from saved raw rows for older uploads
 - `DELETE /uploads/{id}`
 
 Analytics query parameters:
@@ -92,7 +93,7 @@ The app serves the dashboard at `/` and includes:
 - selected metric controls
 - date-based snapshot filters
 - dynamic column visibility management
-- historical monthly and weekly charts by site, with totals, accumulated values, snapshot comparison, and PNG export
+- historical monthly and weekly charts by region, with totals, accumulated values, baseline fallback, snapshot comparison, and PNG export
 - compact grid presentation for operational review
 
 Open the charts view from the header shortcut. The backend aggregates chart data with pandas; the frontend renders it with Chart.js from a CDN. See [docs/CHARTS.md](docs/CHARTS.md) for the data rules and implementation details.

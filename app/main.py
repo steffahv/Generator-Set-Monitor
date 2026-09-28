@@ -2,15 +2,19 @@ import re
 import logging
 import math
 import os
+import mimetypes
 from pathlib import Path
 from datetime import date, datetime
+import unicodedata
+from urllib.parse import quote
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, UploadFile, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 from sqlalchemy import text, inspect
+from sqlalchemy.exc import SQLAlchemyError
 import pandas as pd
 import json
 from io import BytesIO
@@ -18,6 +22,94 @@ from io import BytesIO
 load_dotenv()
 logger = logging.getLogger("myappge.upload")
 logging.basicConfig(level=logging.INFO)
+
+ANALYTICS_REGIONS = ("San Martin", "Arequipa", "La Libertad", "Ancash")
+REGION_ALIASES = {
+    "san martin": {"san martin", "sanmartin", "sm"},
+    "arequipa": {"arequipa", "ar"},
+    "la libertad": {"la libertad", "lalibertad", "ll"},
+    "ancash": {"ancash", "an"},
+}
+
+
+def normalize_analytics_text(value):
+    normalized = unicodedata.normalize("NFKD", str(value or ""))
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    return re.sub(r"\s+", " ", normalized.lower().replace("_", " ").replace("-", " ")).strip()
+
+
+def map_region_name(region_value, site_name):
+    region_text = normalize_analytics_text(region_value)
+    for canonical, aliases in REGION_ALIASES.items():
+        if region_text in aliases or any(alias in region_text for alias in aliases if len(alias) > 2):
+            return next(name for name in ANALYTICS_REGIONS if normalize_analytics_text(name) == canonical)
+
+    site_text = normalize_analytics_text(site_name)
+    compact_site_text = re.sub(r"[^a-z0-9]+", "", site_text)
+    for canonical, aliases in REGION_ALIASES.items():
+        if any(
+            alias in site_text or alias.replace(" ", "") in compact_site_text
+            for alias in aliases
+            if len(alias) > 2
+        ):
+            return next(name for name in ANALYTICS_REGIONS if normalize_analytics_text(name) == canonical)
+        tokens = set(re.findall(r"[a-z0-9]+", site_text))
+        if tokens.intersection(alias for alias in aliases if len(alias) <= 2):
+            return next(name for name in ANALYTICS_REGIONS if normalize_analytics_text(name) == canonical)
+    return None
+
+
+def normalize_baseline_metric(value):
+    normalized = re.sub(r"[^a-z0-9]+", "", normalize_analytics_text(value))
+    if "running" in normalized or normalized in {"rh", "horas"}:
+        return "running_hours"
+    if "start" in normalized or "arranque" in normalized:
+        return "num_starts"
+    return None
+
+
+def parse_baseline_period(period_type, period_label, reference_year):
+    normalized_type = normalize_analytics_text(period_type)
+    label = normalize_analytics_text(period_label)
+    if normalized_type in {"month", "monthly"}:
+        raw_label = str(period_label or "").strip()
+        for label_format in ("%b-%y", "%b %Y", "%B %Y", "%Y-%m", "%Y/%m", "%m/%Y"):
+            try:
+                parsed_label = datetime.strptime(raw_label, label_format)
+                return pd.Timestamp(parsed_label.year, parsed_label.month, 1)
+            except ValueError:
+                continue
+        parsed = pd.to_datetime(raw_label, errors="coerce")
+        return parsed.to_period("M").start_time if not pd.isna(parsed) else None
+
+    if normalized_type not in {"week", "weekly"}:
+        return None
+
+    iso_week = re.search(r"\b(20\d{2})\s*[-_/ ]*\s*w(?:eek)?\s*0?(\d{1,2})\b", label)
+    if iso_week:
+        year, week = int(iso_week.group(1)), int(iso_week.group(2))
+    else:
+        week_match = re.search(r"\b(?:week|wk|w)\s*0?(\d{1,2})\b", label)
+        if not week_match and re.fullmatch(r"\d{1,2}", label):
+            week_match = re.search(r"\d{1,2}", label)
+        if not week_match:
+            week_match = re.search(r"\b(\d{1,2})[-/ ](20\d{2})\b", label)
+            if week_match:
+                year, week = int(week_match.group(2)), int(week_match.group(1))
+                try:
+                    return pd.Timestamp(date.fromisocalendar(year, week, 1))
+                except ValueError:
+                    return None
+        if not week_match:
+            return None
+        week = int(week_match.group(1))
+        year_match = re.search(r"\b(20\d{2})\b", label)
+        year = int(year_match.group(1)) if year_match else int(reference_year)
+
+    try:
+        return pd.Timestamp(date.fromisocalendar(year, week, 1))
+    except ValueError:
+        return None
 
 from app.database import Base, engine, get_db
 from app.mapping import normalize_excel_row
@@ -152,6 +244,8 @@ def ensure_database_schema():
     existing_tables = set(inspector.get_table_names())
 
     add_missing_column("excel_uploads", "snapshot_date", "snapshot_date DATE")
+    add_missing_column("excel_uploads", "file_content", "file_content BYTEA")
+    add_missing_column("sites", "region", "region VARCHAR(100)")
     add_missing_column("generators", "snapshot_date", "snapshot_date DATE")
     add_missing_column("generators", "upload_time", "upload_time TIMESTAMPTZ")
     add_missing_column("rectifiers", "snapshot_date", "snapshot_date DATE")
@@ -271,6 +365,7 @@ def generator_trends(
         Generator.generator_id,
         Generator.site_id,
         Site.site_name,
+        Site.region,
         Generator.router_ip,
         Generator.reg,
         Generator.ip,
@@ -278,82 +373,185 @@ def generator_trends(
         getattr(Generator, metric),
     ).join(Site, Site.site_id == Generator.site_id).filter(Generator.snapshot_date.isnot(None)).all()
 
-    columns = ["generator_id", "site_id", "site_name", "router_ip", "reg", "ip", "snapshot_date", metric]
+    columns = ["generator_id", "site_id", "site_name", "region", "router_ip", "reg", "ip", "snapshot_date", metric]
     df = pd.DataFrame(records, columns=columns)
-    if df.empty:
-        return {
-            "metric": metric,
-            "metric_label": metric_labels[metric],
-            "granularity": granularity,
-            "reference_date": None,
-            "labels": [],
-            "sites": [],
-            "total": [],
-            "accumulated": [],
-            "comparison": None,
+
+    if not df.empty:
+        df["snapshot_date"] = pd.to_datetime(df["snapshot_date"], errors="coerce")
+        df[metric] = pd.to_numeric(df[metric], errors="coerce")
+        df = df.dropna(subset=["snapshot_date", metric])
+        identity_columns = ["site_id", "router_ip", "reg", "ip"]
+        df["device_key"] = df[identity_columns].fillna("").astype(str).agg("|".join, axis=1)
+        df = df.sort_values(["snapshot_date", "generator_id"])
+        df = df.drop_duplicates(subset=[*identity_columns, "snapshot_date"], keep="last")
+        df["region_name"] = df.apply(lambda row: map_region_name(row["region"], row["site_name"]), axis=1)
+        unmapped_sites = sorted(df.loc[df["region_name"].isna(), "site_name"].dropna().astype(str).unique())
+        if unmapped_sites:
+            logger.warning("Analytics skipped sites without a recognized region: %s", unmapped_sites)
+        df = df.dropna(subset=["region_name"])
+
+    try:
+        baseline_rows = db.execute(text(
+            "SELECT period_type, period_label, region_name, metric_name, delta_value "
+            "FROM region_historical_baseline"
+        )).mappings().all()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.exception("Could not read region_historical_baseline")
+        raise HTTPException(
+            status_code=503,
+            detail="Could not read region_historical_baseline; verify that the table and required columns exist.",
+        ) from exc
+
+    latest_operational_date = df["snapshot_date"].max() if not df.empty else None
+    reference_year = (
+        pd.Timestamp(reference_date).isocalendar().year
+        if reference_date
+        else latest_operational_date.isocalendar().year
+        if latest_operational_date is not None
+        else date.today().isocalendar().year
+    )
+    baseline_values = {}
+    for baseline in baseline_rows:
+        baseline_metric = normalize_baseline_metric(baseline["metric_name"])
+        normalized_period_type = normalize_analytics_text(baseline["period_type"])
+        if baseline_metric != metric:
+            continue
+        if granularity == "month" and normalized_period_type not in {"month", "monthly"}:
+            continue
+        if granularity == "week" and normalized_period_type not in {"week", "weekly"}:
+            continue
+
+        region_name = map_region_name(baseline["region_name"], None)
+        period_start = parse_baseline_period(baseline["period_type"], baseline["period_label"], reference_year)
+        delta_value = pd.to_numeric(baseline["delta_value"], errors="coerce")
+        if region_name not in ANALYTICS_REGIONS or period_start is None or pd.isna(delta_value):
+            continue
+        key = (pd.Timestamp(period_start), region_name)
+        baseline_values[key] = baseline_values.get(key, 0.0) + float(delta_value)
+
+    reference_dates = []
+    if latest_operational_date is not None:
+        reference_dates.append(pd.Timestamp(latest_operational_date))
+    if baseline_values:
+        reference_dates.extend(period for period, _ in baseline_values)
+    effective_reference = (
+        pd.Timestamp(reference_date)
+        if reference_date
+        else max(reference_dates) if reference_dates else None
+    )
+
+    if not df.empty and effective_reference is not None:
+        df = df[df["snapshot_date"] <= effective_reference].copy()
+
+    live_values = {}
+    live_period_query = None
+    if effective_reference is not None:
+        period_unit = "month" if granularity == "month" else "week"
+        live_period_query = text(f"""
+            WITH ranked_snapshots AS (
+                SELECT
+                    g.generator_id,
+                    g.site_id,
+                    s.site_name,
+                    s.region,
+                    g.router_ip,
+                    g.reg,
+                    g.ip,
+                    g.snapshot_date,
+                    g.{metric} AS metric_value,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY g.site_id, g.router_ip, g.reg, g.ip, g.snapshot_date
+                        ORDER BY g.generator_id DESC
+                    ) AS row_num
+                FROM generators AS g
+                JOIN sites AS s ON s.site_id = g.site_id
+                WHERE g.snapshot_date IS NOT NULL
+                  AND g.snapshot_date <= :reference_date
+                  AND g.{metric} IS NOT NULL
+            ), deduplicated_snapshots AS (
+                SELECT *
+                FROM ranked_snapshots
+                WHERE row_num = 1
+            ), deltas AS (
+                SELECT
+                    site_id,
+                    site_name,
+                    region,
+                    router_ip,
+                    reg,
+                    ip,
+                    snapshot_date,
+                    metric_value,
+                    LAG(metric_value) OVER (
+                        PARTITION BY site_id, router_ip, reg, ip
+                        ORDER BY snapshot_date
+                    ) AS previous_value
+                FROM deduplicated_snapshots
+            )
+            SELECT
+                date_trunc('{period_unit}', snapshot_date::timestamp)::date AS period_start,
+                site_name,
+                region,
+                CASE
+                    WHEN previous_value IS NULL THEN 0
+                    WHEN metric_value >= previous_value THEN metric_value - previous_value
+                    ELSE metric_value
+                END AS period_value
+            FROM deltas
+        """)
+        live_rows = db.execute(
+            live_period_query,
+            {"reference_date": effective_reference.date()},
+        ).mappings().all()
+        for row in live_rows:
+            region_name = map_region_name(row["region"], row["site_name"])
+            if region_name not in ANALYTICS_REGIONS:
+                continue
+            key = (pd.Timestamp(row["period_start"]), region_name)
+            live_values[key] = live_values.get(key, 0.0) + float(row["period_value"] or 0)
+
+    if effective_reference is not None:
+        baseline_values = {
+            key: value for key, value in baseline_values.items()
+            if key[0] <= effective_reference
         }
 
-    df["snapshot_date"] = pd.to_datetime(df["snapshot_date"], errors="coerce")
-    df[metric] = pd.to_numeric(df[metric], errors="coerce")
-    df = df.dropna(subset=["snapshot_date", metric])
-    if df.empty:
-        return {
-            "metric": metric,
-            "metric_label": metric_labels[metric],
-            "granularity": granularity,
-            "reference_date": None,
-            "labels": [],
-            "sites": [],
-            "total": [],
-            "accumulated": [],
-            "comparison": None,
-        }
+    merged_values = dict(live_values)
+    baseline_cells_used = 0
+    period_sources = {key: "operational" for key in live_values}
+    for key, value in baseline_values.items():
+        if key not in live_values:
+            merged_values[key] = value
+            period_sources[key] = "baseline"
+            baseline_cells_used += 1
 
-    identity_columns = ["site_id", "router_ip", "reg", "ip"]
-    df["device_key"] = df[identity_columns].fillna("").astype(str).agg("|".join, axis=1)
-    df = df.sort_values(["snapshot_date", "generator_id"])
-    df = df.drop_duplicates(subset=[*identity_columns, "snapshot_date"], keep="last")
-    effective_reference = pd.Timestamp(reference_date) if reference_date else df["snapshot_date"].max()
-    df = df[df["snapshot_date"] <= effective_reference].copy()
-    if df.empty:
-        return {
-            "metric": metric,
-            "metric_label": metric_labels[metric],
-            "granularity": granularity,
-            "reference_date": effective_reference.date().isoformat(),
-            "labels": [],
-            "sites": [],
-            "total": [],
-            "accumulated": [],
-            "comparison": None,
-        }
-
-    df = df.sort_values(["device_key", "snapshot_date"])
-    reading_delta = df.groupby("device_key")[metric].diff()
-    # If a cumulative counter was reset, count the new reading as usage since reset.
-    df["period_value"] = reading_delta.where(reading_delta >= 0, df[metric]).fillna(0)
+    if merged_values:
+        available_periods = sorted({period for period, _ in merged_values})
+        frequency = "MS" if granularity == "month" else "W-MON"
+        timeline = pd.date_range(available_periods[0], available_periods[-1], freq=frequency)
+        grouped = pd.DataFrame(0.0, index=timeline, columns=ANALYTICS_REGIONS)
+        for (period, region), value in merged_values.items():
+            if period in grouped.index:
+                grouped.at[period, region] = value
+    else:
+        grouped = pd.DataFrame(columns=ANALYTICS_REGIONS, index=pd.DatetimeIndex([]), dtype=float)
 
     if granularity == "month":
-        df["period_start"] = df["snapshot_date"].dt.to_period("M").dt.start_time
         label_for_period = lambda value: value.strftime("%b-%y")
+        accumulated_series = grouped.sum(axis=1).cumsum()
     else:
-        df["period_start"] = (
-            df["snapshot_date"] - pd.to_timedelta(df["snapshot_date"].dt.weekday, unit="D")
-        ).dt.normalize()
-        label_for_period = lambda value: f"Week {value.isocalendar().week} ({value.strftime('%Y')})"
+        label_for_period = lambda value: f"Week {value.isocalendar().week} ({value.isocalendar().year})"
+        accumulated_series = grouped.sum(axis=1).groupby(grouped.index.to_period("M")).cumsum()
 
-    grouped = df.groupby(["period_start", "site_name"])["period_value"].sum().unstack(fill_value=0).sort_index()
-    site_names = sorted(grouped.columns.tolist())
-    grouped = grouped.reindex(columns=site_names, fill_value=0)
     total_series = grouped.sum(axis=1)
-    accumulated_series = total_series.cumsum()
     visible_periods = grouped.index[-12:]
 
     def number_list(series, index):
         return [round(float(value), 2) for value in series.reindex(index, fill_value=0).tolist()]
 
     comparison = None
-    if comparison_period != "none":
+    if comparison_period != "none" and not df.empty:
         active_snapshot = df["snapshot_date"].max()
         if comparison_period == "DoD":
             previous_target = active_snapshot - pd.Timedelta(days=1)
@@ -371,7 +569,7 @@ def generator_trends(
             snapshot = eligible["snapshot_date"].max()
             values = (
                 eligible[eligible["snapshot_date"] == snapshot]
-                .groupby("site_name")[metric]
+                .groupby("region_name")[metric]
                 .sum()
                 .to_dict()
             )
@@ -379,28 +577,38 @@ def generator_trends(
 
         current_date, current_values = values_at_snapshot(active_snapshot)
         previous_date, previous_values = values_at_snapshot(previous_target)
-        comparison_sites = sorted(set(current_values) | set(previous_values))
         comparison = {
             "current_date": current_date.date().isoformat() if current_date is not None else None,
             "previous_date": previous_date.date().isoformat() if previous_date is not None else None,
-            "sites": comparison_sites,
-            "current": [round(float(current_values.get(site, 0)), 2) for site in comparison_sites],
-            "previous": [round(float(previous_values.get(site, 0)), 2) for site in comparison_sites],
+            "sites": list(ANALYTICS_REGIONS),
+            "current": [round(float(current_values.get(region, 0)), 2) for region in ANALYTICS_REGIONS],
+            "previous": [round(float(previous_values.get(region, 0)), 2) for region in ANALYTICS_REGIONS],
         }
 
     return {
         "metric": metric,
         "metric_label": metric_labels[metric],
         "granularity": granularity,
-        "reference_date": effective_reference.date().isoformat(),
+        "reference_date": effective_reference.date().isoformat() if effective_reference is not None else None,
         "labels": [label_for_period(value) for value in visible_periods],
         "sites": [
-            {"name": site, "values": number_list(grouped[site], visible_periods)}
-            for site in site_names
+            {"name": region, "values": number_list(grouped[region], visible_periods)}
+            for region in ANALYTICS_REGIONS
         ],
         "total": number_list(total_series, visible_periods),
         "accumulated": number_list(accumulated_series, visible_periods),
         "comparison": comparison,
+        "baseline_cells_used": baseline_cells_used,
+        "period_sources": [
+            {
+                "period": label_for_period(period),
+                "regions": {
+                    region: period_sources.get((pd.Timestamp(period), region), "empty")
+                    for region in ANALYTICS_REGIONS
+                },
+            }
+            for period in visible_periods
+        ],
     }
 
 
@@ -483,6 +691,7 @@ def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_db)):
         row_count=int(len(df.index)),
         status="uploaded",
         snapshot_date=snapshot_date,
+        file_content=contents,
     )
     db.add(upload)
     db.commit()
@@ -586,7 +795,15 @@ def upload_excel(file: UploadFile = File(...), db: Session = Depends(get_db)):
 
 @app.get("/uploads")
 def list_uploads(db: Session = Depends(get_db)):
-    uploads = db.query(ExcelUpload).all()
+    uploads = db.query(
+        ExcelUpload.id,
+        ExcelUpload.filename,
+        ExcelUpload.created_at,
+        ExcelUpload.snapshot_date,
+        ExcelUpload.row_count,
+        ExcelUpload.status,
+        ExcelUpload.file_content.isnot(None).label("has_original_file"),
+    ).all()
     return [{
         "id": item.id,
         "filename": item.filename,
@@ -594,7 +811,42 @@ def list_uploads(db: Session = Depends(get_db)):
         "snapshot_date": item.snapshot_date.isoformat() if item.snapshot_date else None,
         "row_count": item.row_count,
         "status": item.status,
+        "has_original_file": item.has_original_file,
     } for item in uploads]
+
+
+@app.get("/uploads/{upload_id}/download")
+def download_upload(upload_id: int, db: Session = Depends(get_db)):
+    upload = db.query(ExcelUpload).filter(ExcelUpload.id == upload_id).first()
+    if not upload:
+        raise HTTPException(status_code=404, detail="Upload record not found")
+
+    if upload.file_content:
+        filename = Path(str(upload.filename).replace("\\", "/")).name
+        media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        return StreamingResponse(
+            BytesIO(upload.file_content),
+            media_type=media_type,
+            headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+        )
+
+    raw_rows = db.query(RawDataRow).filter(
+        RawDataRow.upload_id == upload_id
+    ).order_by(RawDataRow.source_row).all()
+    if not raw_rows:
+        raise HTTPException(status_code=404, detail="No stored file or raw rows are available for this upload")
+
+    parsed_rows = [json.loads(row.data) for row in raw_rows]
+    excel_buffer = BytesIO()
+    pd.DataFrame(parsed_rows).to_excel(excel_buffer, index=False, engine="openpyxl")
+    excel_buffer.seek(0)
+    source_filename = str(upload.filename).replace("\\", "/")
+    filename = f"{Path(source_filename).stem}_reconstructed.xlsx"
+    return StreamingResponse(
+        excel_buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
 
 
 @app.delete("/uploads/{upload_id}")
