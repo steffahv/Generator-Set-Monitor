@@ -313,33 +313,104 @@ def list_sites(db: Session = Depends(get_db)):
     ]
 
 
+def read_generator_snapshot_rows(db: Session, site_id: int | None = None):
+    """Read dashboard snapshots from D0 plus history, keeping the API response shape."""
+    existing_tables = set(inspect(engine).get_table_names(schema="public"))
+    if "generator_daily_history" not in existing_tables:
+        raise HTTPException(status_code=503, detail="generator_daily_history is not available in myappge.")
+
+    if "generator_d0" in existing_tables:
+        source_rows = """
+            SELECT
+                h.snapshot_date, h.captured_at, h.site_id, h.device_type, h.device_index,
+                h.site_name, h.router_ip, h.site_type, h.region, h.device_ip, h.updated_at,
+                h.fuel_level, h.mains_voltage_l1n, h.load_current_l1, h.engine_state,
+                h.controller_mode, h.running_hours, h.total_fuel_consumption, h.num_starts,
+                h.alarms, 1 AS source_priority
+            FROM public.generator_daily_history AS h
+            WHERE h.device_type = 'generator'
+            UNION ALL
+            SELECT
+                d.snapshot_date, d.captured_at, d.site_id, d.device_type, d.device_index,
+                d.site_name, d.router_ip, d.site_type, d.region, d.device_ip, d.updated_at,
+                d.fuel_level, d.mains_voltage_l1n, d.load_current_l1, d.engine_state,
+                d.controller_mode, d.running_hours, d.total_fuel_consumption, d.num_starts,
+                d.alarms, 0 AS source_priority
+            FROM public.generator_d0 AS d
+            WHERE d.device_type = 'generator'
+        """
+    else:
+        source_rows = """
+            SELECT
+                h.snapshot_date, h.captured_at, h.site_id, h.device_type, h.device_index,
+                h.site_name, h.router_ip, h.site_type, h.region, h.device_ip, h.updated_at,
+                h.fuel_level, h.mains_voltage_l1n, h.load_current_l1, h.engine_state,
+                h.controller_mode, h.running_hours, h.total_fuel_consumption, h.num_starts,
+                h.alarms, 1 AS source_priority
+            FROM public.generator_daily_history AS h
+            WHERE h.device_type = 'generator'
+        """
+
+    site_filter = "AND canonical_site_id = :site_id" if site_id is not None else ""
+    rows = db.execute(text(f"""
+        WITH source_rows AS ({source_rows}), mapped_rows AS (
+            SELECT
+                source_rows.*,
+                COALESCE(s.site_id, source_rows.site_id) AS canonical_site_id,
+                COALESCE(NULLIF(source_rows.region, ''), s.region) AS canonical_region,
+                COALESCE(source_rows.site_name, s.site_name) AS canonical_site_name,
+                ROW_NUMBER() OVER (
+                    PARTITION BY
+                        COALESCE(s.site_id, source_rows.site_id),
+                        source_rows.device_type,
+                        source_rows.device_index,
+                        source_rows.snapshot_date
+                    ORDER BY source_rows.source_priority, source_rows.captured_at DESC
+                ) AS row_num
+            FROM source_rows
+            LEFT JOIN public.sites AS s
+              ON lower(trim(s.site_name)) = lower(trim(source_rows.site_name))
+        )
+        SELECT
+            device_index AS generator_id,
+            canonical_site_id AS site_id,
+            router_ip,
+            canonical_site_name AS site,
+            site_type,
+            canonical_region AS reg,
+            device_ip AS ip,
+            alarms::text AS alarms,
+            fuel_level AS fuel_percent,
+            mains_voltage_l1n AS mains_voltage,
+            load_current_l1 AS load_amperes,
+            updated_at AS update_time,
+            captured_at AS upload_time,
+            snapshot_date,
+            engine_state,
+            controller_mode,
+            running_hours,
+            total_fuel_consumption,
+            num_starts,
+            device_type,
+            device_index
+        FROM mapped_rows
+        WHERE row_num = 1 {site_filter}
+        ORDER BY snapshot_date DESC, site, device_index
+    """), {"site_id": site_id} if site_id is not None else {}).mappings().all()
+
+    result = []
+    for row in rows:
+        item = dict(row)
+        for field in ("update_time", "upload_time", "snapshot_date"):
+            if item[field] is not None:
+                item[field] = item[field].isoformat()
+        result.append(item)
+    return result
+
+
 @app.get("/generators")
 def list_all_generators(db: Session = Depends(get_db)):
-    generators = db.query(Generator).all()
-    return [
-        {
-            "generator_id": generator.generator_id,
-            "site_id": generator.site_id,
-            "router_ip": generator.router_ip,
-            "site": generator.site,
-            "site_type": generator.site_type,
-            "reg": generator.reg,
-            "ip": generator.ip,
-            "alarms": generator.alarms,
-            "fuel_percent": generator.fuel_percent,
-            "mains_voltage": generator.mains_voltage,
-            "load_amperes": generator.load_amperes,
-            "update_time": generator.update_time,
-            "upload_time": generator.upload_time.isoformat() if generator.upload_time else None,
-            "snapshot_date": generator.snapshot_date.isoformat() if generator.snapshot_date else None,
-            "engine_state": generator.engine_state,
-            "controller_mode": generator.controller_mode,
-            "running_hours": generator.running_hours,
-            "total_fuel_consumption": generator.total_fuel_consumption,
-            "num_starts": generator.num_starts,
-        }
-        for generator in generators
-    ]
+    return read_generator_snapshot_rows(db)
 
 
 @app.get("/analytics/generator-trends")
@@ -361,26 +432,52 @@ def generator_trends(
     if comparison_period not in {"none", "DoD", "WoW", "6DayBack", "MoM"}:
         raise HTTPException(status_code=400, detail="Unsupported comparison period")
 
-    records = db.query(
-        Generator.generator_id,
-        Generator.site_id,
-        Site.site_name,
-        Site.region,
-        Generator.router_ip,
-        Generator.reg,
-        Generator.ip,
-        Generator.snapshot_date,
-        getattr(Generator, metric),
-    ).join(Site, Site.site_id == Generator.site_id).filter(Generator.snapshot_date.isnot(None)).all()
+    history_records = db.execute(text(f"""
+        WITH ranked_history AS (
+            SELECT
+                h.device_index AS generator_id,
+                COALESCE(s.site_id, h.site_id) AS site_id,
+                COALESCE(h.site_name, s.site_name) AS site_name,
+                COALESCE(NULLIF(h.region, ''), s.region) AS region,
+                h.router_ip,
+                COALESCE(NULLIF(h.region, ''), s.region) AS reg,
+                h.device_ip AS ip,
+                h.device_type,
+                h.device_index,
+                h.snapshot_date,
+                h.{metric} AS metric_value,
+                ROW_NUMBER() OVER (
+                    PARTITION BY
+                        COALESCE(s.site_id, h.site_id),
+                        h.device_type,
+                        h.device_index,
+                        h.snapshot_date
+                    ORDER BY h.captured_at DESC, h.site_id DESC
+                ) AS row_num
+            FROM public.generator_daily_history AS h
+            LEFT JOIN public.sites AS s
+              ON lower(trim(s.site_name)) = lower(trim(h.site_name))
+            WHERE h.device_type = 'generator'
+              AND h.snapshot_date IS NOT NULL
+        )
+        SELECT
+            generator_id, site_id, site_name, region, router_ip, reg, ip,
+            device_type, device_index, snapshot_date, metric_value AS {metric}
+        FROM ranked_history
+        WHERE row_num = 1
+    """)).mappings().all()
 
-    columns = ["generator_id", "site_id", "site_name", "region", "router_ip", "reg", "ip", "snapshot_date", metric]
-    df = pd.DataFrame(records, columns=columns)
+    columns = [
+        "generator_id", "site_id", "site_name", "region", "router_ip", "reg", "ip",
+        "device_type", "device_index", "snapshot_date", metric,
+    ]
+    df = pd.DataFrame(history_records, columns=columns)
 
     if not df.empty:
         df["snapshot_date"] = pd.to_datetime(df["snapshot_date"], errors="coerce")
         df[metric] = pd.to_numeric(df[metric], errors="coerce")
         df = df.dropna(subset=["snapshot_date", metric])
-        identity_columns = ["site_id", "router_ip", "reg", "ip"]
+        identity_columns = ["site_id", "device_type", "device_index"]
         df["device_key"] = df[identity_columns].fillna("").astype(str).agg("|".join, axis=1)
         df = df.sort_values(["snapshot_date", "generator_id"])
         df = df.drop_duplicates(subset=[*identity_columns, "snapshot_date"], keep="last")
@@ -444,29 +541,39 @@ def generator_trends(
     if not df.empty and effective_reference is not None:
         df = df[df["snapshot_date"] <= effective_reference].copy()
 
-    live_values = {}
+    live_weekly_values = {}
     live_period_query = None
     if effective_reference is not None:
-        period_unit = "month" if granularity == "month" else "week"
+        # Keep operational deltas at weekly grain. The monthly view is rolled
+        # up from these same weekly regional variances below.
+        period_unit = "week"
         live_period_query = text(f"""
             WITH ranked_snapshots AS (
                 SELECT
-                    g.generator_id,
-                    g.site_id,
-                    s.site_name,
-                    s.region,
+                    g.device_index AS generator_id,
+                    COALESCE(s.site_id, g.site_id) AS site_id,
+                    COALESCE(g.site_name, s.site_name) AS site_name,
+                    COALESCE(NULLIF(g.region, ''), s.region) AS region,
                     g.router_ip,
-                    g.reg,
-                    g.ip,
+                    COALESCE(NULLIF(g.region, ''), s.region) AS reg,
+                    g.device_ip AS ip,
+                    g.device_type,
+                    g.device_index,
                     g.snapshot_date,
                     g.{metric} AS metric_value,
                     ROW_NUMBER() OVER (
-                        PARTITION BY g.site_id, g.router_ip, g.reg, g.ip, g.snapshot_date
-                        ORDER BY g.generator_id DESC
+                        PARTITION BY
+                            COALESCE(s.site_id, g.site_id),
+                            g.device_type,
+                            g.device_index,
+                            g.snapshot_date
+                        ORDER BY g.captured_at DESC, g.site_id DESC
                     ) AS row_num
-                FROM generators AS g
-                JOIN sites AS s ON s.site_id = g.site_id
-                WHERE g.snapshot_date IS NOT NULL
+                FROM public.generator_daily_history AS g
+                LEFT JOIN public.sites AS s
+                  ON lower(trim(s.site_name)) = lower(trim(g.site_name))
+                WHERE g.device_type = 'generator'
+                  AND g.snapshot_date IS NOT NULL
                   AND g.snapshot_date <= :reference_date
                   AND g.{metric} IS NOT NULL
             ), deduplicated_snapshots AS (
@@ -478,13 +585,12 @@ def generator_trends(
                     site_id,
                     site_name,
                     region,
-                    router_ip,
-                    reg,
-                    ip,
+                    device_type,
+                    device_index,
                     snapshot_date,
                     metric_value,
                     LAG(metric_value) OVER (
-                        PARTITION BY site_id, router_ip, reg, ip
+                        PARTITION BY site_id, device_type, device_index
                         ORDER BY snapshot_date
                     ) AS previous_value
                 FROM deduplicated_snapshots
@@ -509,7 +615,24 @@ def generator_trends(
             if region_name not in ANALYTICS_REGIONS:
                 continue
             key = (pd.Timestamp(row["period_start"]), region_name)
-            live_values[key] = live_values.get(key, 0.0) + float(row["period_value"] or 0)
+            live_weekly_values[key] = live_weekly_values.get(key, 0.0) + float(row["period_value"] or 0)
+
+    def reporting_month_for_week(week_start):
+        # A week belongs to the month of its Sunday. For the in-progress week,
+        # cap that date at the reference date so Week 40 on Sep 28 stays in Sep.
+        week_end = pd.Timestamp(week_start) + pd.Timedelta(days=6)
+        if effective_reference is not None:
+            week_end = min(week_end, pd.Timestamp(effective_reference))
+        return week_end.to_period("M").start_time
+
+    if granularity == "week":
+        live_values = live_weekly_values
+    else:
+        # Monthly operational values are the sum of weekly regional variances.
+        live_values = {}
+        for (week_start, region_name), value in live_weekly_values.items():
+            key = (reporting_month_for_week(week_start), region_name)
+            live_values[key] = live_values.get(key, 0.0) + value
 
     if effective_reference is not None:
         baseline_values = {
@@ -542,7 +665,13 @@ def generator_trends(
         accumulated_series = grouped.sum(axis=1).cumsum()
     else:
         label_for_period = lambda value: f"Week {value.isocalendar().week} ({value.isocalendar().year})"
-        accumulated_series = grouped.sum(axis=1).groupby(grouped.index.to_period("M")).cumsum()
+        # Group weekly accumulation by its reporting month, not Monday's month;
+        # this keeps Week 36 (Aug 31–Sep 6) in September's running total.
+        week_reporting_months = pd.Series(
+            [reporting_month_for_week(period) for period in grouped.index],
+            index=grouped.index,
+        )
+        accumulated_series = grouped.sum(axis=1).groupby(week_reporting_months).cumsum()
 
     total_series = grouped.sum(axis=1)
     visible_periods = grouped.index[-12:]
@@ -614,31 +743,7 @@ def generator_trends(
 
 @app.get("/sites/{site_id}/generators")
 def list_generators(site_id: int, db: Session = Depends(get_db)):
-    generators = db.query(Generator).filter(Generator.site_id == site_id).all()
-    return [
-        {
-            "generator_id": generator.generator_id,
-            "site_id": generator.site_id,
-            "router_ip": generator.router_ip,
-            "site": generator.site,
-            "site_type": generator.site_type,
-            "reg": generator.reg,
-            "ip": generator.ip,
-            "alarms": generator.alarms,
-            "fuel_percent": generator.fuel_percent,
-            "mains_voltage": generator.mains_voltage,
-            "load_amperes": generator.load_amperes,
-            "update_time": generator.update_time,
-            "upload_time": generator.upload_time.isoformat() if generator.upload_time else None,
-            "snapshot_date": generator.snapshot_date.isoformat() if generator.snapshot_date else None,
-            "engine_state": generator.engine_state,
-            "controller_mode": generator.controller_mode,
-            "running_hours": generator.running_hours,
-            "total_fuel_consumption": generator.total_fuel_consumption,
-            "num_starts": generator.num_starts,
-        }
-        for generator in generators
-    ]
+    return read_generator_snapshot_rows(db, site_id=site_id)
 
 
 @app.get("/sites/{site_id}/rectifiers")

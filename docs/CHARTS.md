@@ -48,26 +48,26 @@ The response contains:
 - `labels`: the latest 12 month or week labels through the reference date.
 - `sites`: one `{name, values}` series for each of the four canonical regions: `San Martin`, `Arequipa`, `La Libertad`, and `Ancash`. The key remains named `sites` for compatibility with the chart renderer.
 - `total`: horizontal sum of the four regional values for each period.
-- `accumulated`: cumulative total. Monthly charts accumulate across the entire available history through the reference date. Weekly charts restart the accumulated value when the week-start month changes. Both are calculated before the 12-label display window is sliced.
+- `accumulated`: monthly charts accumulate monthly totals across available history. Weekly charts sum weekly totals and restart at each reporting-month boundary. A week is assigned by its Sunday; the current incomplete week is assigned using the reference date. Both are calculated before the 12-label display window is sliced.
 - `comparison`: `null` when comparison is off; otherwise, regional labels, actual snapshot dates, and current/previous raw counter totals.
 - `baseline_cells_used`: number of missing `(period, region)` cells filled from the historical baseline.
 - `period_sources`: for each displayed period and region, identifies whether the value came from `operational`, `baseline`, or neither (`empty`).
 
 ## Backend data flow and rules
 
-`generator_trends` reads `Generator` rows joined to `Site`, including `Site.region` and `Site.site_name`. PostgreSQL calculates live counter deltas with window functions. Python maps those rows to canonical regions, combines them with the manual baseline, and assembles the timeline. The same deduplicated snapshot rows are prepared in pandas for the raw-snapshot comparison chart.
+`generator_trends` reads `public.generator_daily_history`, mapped to the application's `public.sites` by normalized `site_name` so source-system IDs are not mistaken for local site IDs. The main dashboard reads this history and, when available in the same database, overlays `public.generator_d0` for the current snapshot. PostgreSQL calculates live counter deltas with window functions. Python maps those rows to canonical regions, combines them with the manual baseline, and assembles the timeline. The same history snapshots are prepared in pandas for the raw-snapshot comparison chart.
 
 The chart grouping key is the canonical region rather than the individual site name. The endpoint first maps `Site.region`; if the field is blank or unrecognized, it infers the region from `site_name`. It recognizes the full names and common codes `SM`, `AR`, `LL`, and `AN`, and normalizes accents and casing. Sites that do not map to one of the four target regions are skipped and written to the application log. Startup also adds the nullable `sites.region` column to older databases if it is missing.
 
 ### Deduplication
 
-An import creates generator records for its snapshot date. Re-uploading the same file/date can therefore create repeated rows. Both the trend query and the comparison preparation keep the greatest `generator_id` for each:
+The historical table is keyed by snapshot date and device. When rows from D0 and history overlap, the dashboard prefers D0 for that date/device. The trend query also ranks duplicate mapped rows and keeps the latest capture for each:
 
 ```text
-(site_id, router_ip, reg, ip, snapshot_date)
+(local site_id, device_type, device_index, snapshot_date)
 ```
 
-The highest `generator_id` is treated as the most recently inserted row for that identity and date. Keep this key aligned with the generator identity used by the main comparison logic if that logic changes.
+The identity is mapped through the local site name and uses the source device type and index. Keep this key aligned with the source table's primary key if that identity changes.
 
 ### Period trend values
 
@@ -79,7 +79,9 @@ period_value = current reading - previous reading
 
 The first known reading contributes zero because it has no previous value for comparison. If the counter decreases, the code treats that as a reset and uses the new reading as usage since reset. Missing days do not cause repeated addition of the counter: the next reading is compared with the preceding available snapshot, and that difference is assigned once to the later snapshot's period.
 
-The endpoint maps each row to its canonical region and sums deltas by `(period, region)`. Source selection is cell-by-cell:
+The endpoint maps each row to its canonical region and first sums live deltas by `(week_start, region)`. The weekly chart uses those weekly variances directly. The monthly chart is rolled up from the same weekly regional variances; it does not add raw snapshot readings. A week belongs to the month containing its Sunday, keeping a cross-month week together. For the current incomplete week, the reference date caps the week end, so Week 40 on September 28 is counted in September.
+
+Source selection is cell-by-cell after this weekly calculation (and monthly rollup where applicable):
 
 1. Use the operational sum when that period and region have generator readings.
 2. Otherwise, use the matching `delta_value` from `region_historical_baseline`.
@@ -89,7 +91,7 @@ The baseline columns are `period_type`, `period_label`, `region_name`, `metric_n
 
 For the September 2026 data reviewed during this change, the manual baseline rows total **429.6** running hours, while the operational deltas from daily generator snapshots total about **460.068**. Because all four regions have operational values for September, the chart uses those operational values and ignores the September baseline cells. The API previously returned an incorrect value near **74,572**. The trend calculation was moved to an explicit PostgreSQL `ROW_NUMBER()` + `LAG()` query matching the validated SQL calculation; the corrected chart now shows the operational result rather than accumulating full daily readings.
 
-Month and week periods from operational data and baseline data are merged into one continuous timeline. The endpoint reindexes that range; any period/region cell absent from both sources is zero. `GE Total hours` (or `GE Total starts`) is the horizontal sum across the four regions per period. The monthly `Accumulated` series is a continuous running sum; the weekly series resets by the month containing each week's Monday start. The calculations cover the complete merged history through the reference date even though the trend chart displays only the latest 12 labels.
+Month and week periods from operational data and baseline data are merged into one continuous timeline. The endpoint reindexes that range; any period/region cell absent from both sources is zero. `GE Total hours` (or `GE Total starts`) is the horizontal sum across the four regions per period. The monthly `Accumulated` series is a continuous running sum of monthly totals. The weekly `Accumulated` series is a running sum of weekly totals that resets when the reporting month changes. For example, the supplied Week 36–39 values produce `149.0 + 193.8 + 86.8 + 18.0 = 447.6` at Week 39; Week 40 adds its current weekly variance to that September total. Calculations cover the complete merged history through the reference date even though the trend chart displays only the latest 12 labels.
 
 Monthly baseline labels can use labels such as `Feb-26` or `2026-02`. Weekly labels can include a year (for example, `Week 33 (2026)` or `2026-W33`). If a weekly label omits its year, the endpoint interprets it in the ISO year of the reference date; include a year in `period_label` when the baseline spans multiple years.
 

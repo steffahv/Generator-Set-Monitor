@@ -1233,6 +1233,14 @@
       }
 
       function getGeneratorIdentity(row) {
+        if (row.device_index !== null && row.device_index !== undefined) {
+          return [
+            String(row.site_id ?? ''),
+            String(row.device_type ?? 'generator'),
+            String(row.device_index),
+          ].join('|').toLowerCase();
+        }
+
         return [
           String(row.site_id ?? ''),
           String(row.router_ip ?? ''),
