@@ -920,6 +920,111 @@ def list_uploads(db: Session = Depends(get_db)):
     } for item in uploads]
 
 
+@app.get("/history-captures")
+def list_history_captures(db: Session = Depends(get_db)):
+    """Summarize daily source captures so users can audit history without DB access."""
+    existing_tables = set(inspect(engine).get_table_names(schema="public"))
+    if "generator_daily_history" not in existing_tables:
+        raise HTTPException(status_code=503, detail="generator_daily_history is not available in myappge.")
+
+    current_date = None
+    if "generator_d0" in existing_tables:
+        current_date = db.execute(text(
+            "SELECT MAX(snapshot_date) FROM public.generator_d0 WHERE device_type = 'generator'"
+        )).scalar()
+
+    try:
+        rows = db.execute(text("""
+            SELECT
+                snapshot_date,
+                MAX(captured_at) AS captured_at,
+                COUNT(*) AS generator_count,
+                COUNT(*) FILTER (
+                    WHERE updated_at IS NOT NULL
+                      AND (updated_at AT TIME ZONE 'America/Lima')::date = snapshot_date
+                ) AS readings_today,
+                COUNT(*) FILTER (
+                    WHERE updated_at IS NULL
+                       OR (updated_at AT TIME ZONE 'America/Lima')::date <> snapshot_date
+                ) AS fallback_count,
+                COUNT(*) FILTER (
+                    WHERE jsonb_typeof(alarms) = 'array'
+                      AND jsonb_array_length(alarms) > 0
+                ) AS generators_with_alarms
+            FROM public.generator_daily_history
+            WHERE device_type = 'generator'
+              AND snapshot_date IS NOT NULL
+            GROUP BY snapshot_date
+            ORDER BY snapshot_date DESC
+        """)).mappings().all()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.exception("Could not read generator_daily_history capture summaries")
+        raise HTTPException(status_code=503, detail="Could not read generator_daily_history capture summaries.") from exc
+
+    return [{
+        "snapshot_date": row["snapshot_date"].isoformat(),
+        "captured_at": row["captured_at"].isoformat() if row["captured_at"] else None,
+        "generator_count": int(row["generator_count"] or 0),
+        "readings_today": int(row["readings_today"] or 0),
+        "fallback_count": int(row["fallback_count"] or 0),
+        "generators_with_alarms": int(row["generators_with_alarms"] or 0),
+        "is_current": current_date is not None and row["snapshot_date"] == current_date,
+    } for row in rows]
+
+
+@app.get("/history-captures/{snapshot_date}/download")
+def download_history_capture(snapshot_date: date, db: Session = Depends(get_db)):
+    """Export one stored daily snapshot to Excel."""
+    existing_tables = set(inspect(engine).get_table_names(schema="public"))
+    if "generator_daily_history" not in existing_tables:
+        raise HTTPException(status_code=503, detail="generator_daily_history is not available in myappge.")
+
+    try:
+        rows = db.execute(text("""
+            SELECT
+                snapshot_date, captured_at, site_id, device_type, device_index,
+                site_name, router_ip, site_type, region, device_ip, updated_at,
+                fuel_level, mains_voltage_l1n, load_current_l1, engine_state,
+                controller_mode, running_hours, total_fuel_consumption, num_starts,
+                alarms, _last_reading
+            FROM public.generator_daily_history
+            WHERE device_type = 'generator'
+              AND snapshot_date = :snapshot_date
+            ORDER BY region, site_name, device_index
+        """), {"snapshot_date": snapshot_date}).mappings().all()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.exception("Could not export generator_daily_history snapshot %s", snapshot_date)
+        raise HTTPException(status_code=503, detail="Could not export the requested history capture.") from exc
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="No generator history capture exists for that date.")
+
+    export_rows = []
+    for row in rows:
+        values = dict(row)
+        for field in ("alarms", "_last_reading"):
+            if values[field] is not None:
+                values[field] = json.dumps(values[field], ensure_ascii=False, default=str)
+        # Excel cannot store timezone-aware datetime objects; preserve their
+        # offsets as ISO text in the exported workbook.
+        for field in ("captured_at", "updated_at"):
+            if values[field] is not None:
+                values[field] = values[field].isoformat()
+        export_rows.append(values)
+
+    excel_buffer = BytesIO()
+    pd.DataFrame(export_rows).to_excel(excel_buffer, index=False, engine="openpyxl")
+    excel_buffer.seek(0)
+    filename = f"generator-history-{snapshot_date.isoformat()}.xlsx"
+    return StreamingResponse(
+        excel_buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
+
+
 @app.get("/uploads/{upload_id}/download")
 def download_upload(upload_id: int, db: Session = Depends(get_db)):
     upload = db.query(ExcelUpload).filter(ExcelUpload.id == upload_id).first()

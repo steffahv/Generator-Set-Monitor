@@ -476,7 +476,7 @@
           <h1>Generator Set Monitor</h1>
           <button id="openAnalyticsButton" class="header-shortcut" type="button">Charts &amp; comparison</button>
         </div>
-        <div class="subtitle">Upload files, inspect the raw data, and review the structured generator records by site.</div>
+        <div class="subtitle">Review current generator readings, daily capture history, and historical trends.</div>
       </header>
 
       <div id="mainView">
@@ -567,30 +567,19 @@
       </section>
 
       <section class="section">
-        <h2 class="section-title">Upload Excel</h2>
-        <div class="upload-row">
-          <div class="field">
-            <label for="fileInput">Select file</label>
-            <input id="fileInput" type="file" accept=".xlsx,.xls,.csv" />
-          </div>
-          <div class="field">
-            <label>&nbsp;</label>
-            <button id="uploadButton" type="button">Upload file</button>
-          </div>
-        </div>
-        <div id="uploadStatus" class="status">Waiting for a file upload.</div>
-      </section>
-
-      <section class="section">
         <div class="panel-header" style="margin-bottom:12px;">
-          <h2 class="section-title" style="margin:0;">Recent uploads</h2>
+          <h2 class="section-title" style="margin:0;">Daily capture history</h2>
           <div class="field" style="min-width:220px; margin:0;">
-            <label for="uploadHistoryFilter">Filter by snapshot date</label>
-            <input id="uploadHistoryFilter" type="date" />
+            <label for="captureHistoryFilter">Filter by capture date</label>
+            <input id="captureHistoryFilter" type="date" />
           </div>
         </div>
+        <p class="muted">A fallback is a row whose <code>updated_at</code> is missing or whose Peru-local date differs from the capture date. This page only classifies stored rows; it does not fill or recalculate readings. In the capture process you described, the importer retains the last available reading when no new one arrives and writes that value into the daily tables. Download the Excel and inspect <code>updated_at</code> and <code>_last_reading</code> for traceability. If <code>updated_at</code> is empty, this row does not identify the original reading time. “Generators with alarms” counts generators with a non-empty alarms list.</p>
         <div class="table-wrap">
-          <div id="uploadsTableContainer"></div>
+          <div id="historyCapturesTableContainer"></div>
+        </div>
+        <div style="display:flex;justify-content:center;margin-top:12px;">
+          <button id="captureHistoryToggle" class="secondary" type="button" style="width:auto;" hidden>Show more</button>
         </div>
       </section>
       </div>
@@ -681,11 +670,9 @@
       let comparisonChartInstance = null;
       let allGenerators = [];
 
-      const uploadButton = document.getElementById('uploadButton');
-      const fileInput = document.getElementById('fileInput');
-      const uploadStatus = document.getElementById('uploadStatus');
       const tableStatus = document.getElementById('tableStatus');
-      const uploadsTableContainer = document.getElementById('uploadsTableContainer');
+      const historyCapturesTableContainer = document.getElementById('historyCapturesTableContainer');
+      const captureHistoryToggle = document.getElementById('captureHistoryToggle');
       const mainTableContainer = document.getElementById('mainTableContainer');
       const siteSelect = document.getElementById('siteSelect');
       const generatorSearch = document.getElementById('generatorSearch');
@@ -693,7 +680,7 @@
       const updateDateFilter = document.getElementById('updateDateFilter');
       const uploadDateFilter = document.getElementById('uploadDateFilter');
       const snapshotDateFilter = document.getElementById('snapshotDateFilter');
-      const uploadHistoryFilter = document.getElementById('uploadHistoryFilter');
+      const captureHistoryFilter = document.getElementById('captureHistoryFilter');
       const comparisonPeriodSelect = document.getElementById('comparisonPeriodSelect');
       const comparisonMetricSelect = document.getElementById('comparisonMetricSelect');
       const columnPicker = document.getElementById('columnPicker');
@@ -703,6 +690,7 @@
       const selectAllColumnsButton = document.getElementById('selectAllColumns');
       const clearAllColumnsButton = document.getElementById('clearAllColumns');
       let activeComparisonSort = null;
+      let captureHistoryExpanded = false;
 
       function formatChartDate(value) {
         if (!value) return '';
@@ -1796,94 +1784,40 @@
         renderTable(mainTableContainer, displayRows, visibleColumns);
       }
 
-      uploadButton.addEventListener('click', async () => {
-        const file = fileInput.files[0];
-        if (!file) {
-          uploadStatus.textContent = 'Please choose a file first.';
-          return;
-        }
-
-        const formData = new FormData();
-        formData.append('file', file);
-
+      async function loadHistoryCaptures() {
         try {
-          uploadStatus.textContent = 'Uploading file...';
-          const result = await fetchJson(`${API_BASE}/upload-excel`, {
-            method: 'POST',
-            body: formData,
-          });
-
-          uploadStatus.textContent = `File uploaded successfully: ${result.filename} (${result.row_count} rows)`;
-          await loadUploads();
-          await loadSites();
-          const currentSiteId = siteSelect.value || '';
-          if (currentSiteId) {
-            await loadGenerators(currentSiteId);
-          }
-        } catch (error) {
-          uploadStatus.textContent = `Upload failed: ${error.message}`;
-        }
-      });
-
-      function formatUploadDate(value) {
-        if (!value) {
-          return '';
-        }
-
-        const date = new Date(value);
-        if (Number.isNaN(date.getTime())) {
-          return '';
-        }
-
-        const day = String(date.getDate()).padStart(2, '0');
-        const month = String(date.getMonth() + 1).padStart(2, '0');
-        const year = date.getFullYear();
-        return `${day}/${month}/${year}`;
-      }
-
-      async function loadUploads() {
-        try {
-          const uploads = await fetchJson(`${API_BASE}/uploads`);
-          const uploadColumns = [
-            { key: 'id', label: 'ID' },
-            { key: 'filename', label: 'Filename' },
+          const captures = await fetchJson(`${API_BASE}/history-captures`);
+          const captureColumns = [
             { key: 'snapshot_date', label: 'Snapshot date' },
-            { key: 'created_at', label: 'Upload date' },
-            { key: 'row_count', label: 'Row count' },
-            { key: 'status', label: 'Status' },
+            { key: 'captured_at', label: 'Capture time' },
+            { key: 'generator_count', label: 'Generators' },
+            { key: 'readings_today', label: 'Readings from that day' },
+            { key: 'fallback_count', label: 'Fallback readings' },
+            { key: 'generators_with_alarms', label: 'Generators with alarms' },
             { key: 'actions', label: 'Actions' },
           ];
 
-          const rows = uploads
-            .filter((upload) => {
-              if (!uploadHistoryFilter.value) {
-                return true;
-              }
-              return getDateOnlyValue(upload.snapshot_date || upload.created_at) === uploadHistoryFilter.value;
-            })
-            .map((upload) => ({
-              ...upload,
-              snapshot_date: upload.snapshot_date ? (() => {
-                const date = parseDateValue(upload.snapshot_date);
-                if (!date) {
-                  return '';
-                }
-                const day = String(date.getDate()).padStart(2, '0');
-                const month = String(date.getMonth() + 1).padStart(2, '0');
-                const year = date.getFullYear();
-                return `${day}/${month}/${year}`;
-              })() : '',
-              created_at: formatUploadDate(upload.created_at),
-              download_label: 'Download',
-              actions: `delete-${upload.id}`,
-            }));
+          const rows = captures.filter((capture) =>
+            !captureHistoryFilter.value || capture.snapshot_date === captureHistoryFilter.value
+          );
+
+          const visibleRows = captureHistoryExpanded ? rows : rows.slice(0, 5);
+          captureHistoryToggle.hidden = rows.length <= 5;
+          captureHistoryToggle.textContent = captureHistoryExpanded
+            ? 'Show less'
+            : `Show more (${rows.length - 5})`;
+
+          if (!rows.length) {
+            historyCapturesTableContainer.innerHTML = '<div class="muted" style="padding:18px;">No daily captures found for this date.</div>';
+            return;
+          }
 
           const table = document.createElement('table');
           const thead = document.createElement('thead');
           const tbody = document.createElement('tbody');
 
           const headerRow = document.createElement('tr');
-          uploadColumns.forEach((column) => {
+          captureColumns.forEach((column) => {
             const th = document.createElement('th');
             th.textContent = column.label;
             headerRow.appendChild(th);
@@ -1891,19 +1825,14 @@
           thead.appendChild(headerRow);
           table.appendChild(thead);
 
-          rows.forEach((row) => {
+          visibleRows.forEach((row) => {
             const tr = document.createElement('tr');
-            uploadColumns.forEach((column) => {
+            captureColumns.forEach((column) => {
               const td = document.createElement('td');
               if (column.key === 'actions') {
-                const actionGroup = document.createElement('div');
-                actionGroup.style.display = 'flex';
-                actionGroup.style.alignItems = 'center';
-                actionGroup.style.gap = '8px';
-
                 const downloadLink = document.createElement('a');
-                downloadLink.href = `${API_BASE}/uploads/${row.id}/download`;
-                downloadLink.textContent = row.download_label;
+                downloadLink.href = `${API_BASE}/history-captures/${row.snapshot_date}/download`;
+                downloadLink.textContent = 'Download Excel';
                 downloadLink.className = 'ghost';
                 downloadLink.style.display = 'inline-block';
                 downloadLink.style.width = 'auto';
@@ -1915,35 +1844,21 @@
                 downloadLink.style.fontSize = '14px';
                 downloadLink.style.fontWeight = '700';
                 downloadLink.style.textDecoration = 'none';
-                if (!row.has_original_file) {
-                  downloadLink.title = 'The original file was not retained for this older upload; this downloads the stored rows as a reconstructed Excel workbook.';
+                downloadLink.title = `Download the ${row.snapshot_date} generator capture as an Excel workbook.`;
+                td.appendChild(downloadLink);
+              } else if (column.key === 'snapshot_date') {
+                td.textContent = formatChartDate(row.snapshot_date);
+                if (row.is_current) {
+                  const currentTag = document.createElement('span');
+                  currentTag.className = 'tag';
+                  currentTag.textContent = 'Current';
+                  currentTag.style.marginLeft = '8px';
+                  td.appendChild(currentTag);
                 }
-                actionGroup.appendChild(downloadLink);
-
-                const button = document.createElement('button');
-                button.type = 'button';
-                button.textContent = 'Delete';
-                button.className = 'ghost';
-                button.style.width = 'auto';
-                button.style.padding = '7px 12px';
-                button.addEventListener('click', async () => {
-                  const confirmed = window.confirm(`Delete upload history: ${row.filename}? This only removes the upload record and does not alter the structured site/generator data.`);
-                  if (!confirmed) {
-                    return;
-                  }
-
-                  try {
-                    await fetchJson(`${API_BASE}/uploads/${row.id}`, { method: 'DELETE' });
-                    await loadUploads();
-                    uploadStatus.textContent = `Deleted upload record: ${row.filename}`;
-                  } catch (error) {
-                    uploadStatus.textContent = `Could not delete upload record: ${error.message}`;
-                  }
-                });
-                actionGroup.appendChild(button);
-                td.appendChild(actionGroup);
+              } else if (column.key === 'captured_at') {
+                td.textContent = row.captured_at ? formatDateTimeValue(row.captured_at) : '-';
               } else {
-                td.textContent = row[column.key] ?? '';
+                td.textContent = Number(row[column.key] ?? 0).toLocaleString();
               }
               tr.appendChild(td);
             });
@@ -1951,10 +1866,10 @@
           });
 
           table.appendChild(tbody);
-          uploadsTableContainer.innerHTML = '';
-          uploadsTableContainer.appendChild(table);
+          historyCapturesTableContainer.innerHTML = '';
+          historyCapturesTableContainer.appendChild(table);
         } catch (error) {
-          uploadsTableContainer.innerHTML = `<div class="muted" style="padding:18px;">Could not load uploads: ${error.message}</div>`;
+          historyCapturesTableContainer.innerHTML = `<div class="muted" style="padding:18px;">Could not load capture history: ${error.message}</div>`;
         }
       }
 
@@ -2024,7 +1939,14 @@
       updateDateFilter.addEventListener('change', renderGeneratorTable);
       uploadDateFilter.addEventListener('change', renderGeneratorTable);
       snapshotDateFilter.addEventListener('change', renderGeneratorTable);
-      uploadHistoryFilter.addEventListener('change', loadUploads);
+      captureHistoryFilter.addEventListener('change', () => {
+        captureHistoryExpanded = false;
+        loadHistoryCaptures();
+      });
+      captureHistoryToggle.addEventListener('click', () => {
+        captureHistoryExpanded = !captureHistoryExpanded;
+        loadHistoryCaptures();
+      });
 
       document.getElementById('openAnalyticsButton').addEventListener('click', () => showAnalyticsView(true));
       document.getElementById('backToMainButton').addEventListener('click', () => showAnalyticsView(false));
@@ -2044,7 +1966,7 @@
 
       async function init() {
         renderColumnPicker();
-        await loadUploads();
+        await loadHistoryCaptures();
         const sites = await loadSites();
         siteSelect.value = '';
         if (sites.length) {
