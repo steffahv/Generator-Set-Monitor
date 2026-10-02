@@ -542,6 +542,7 @@ def generator_trends(
         df = df[df["snapshot_date"] <= effective_reference].copy()
 
     live_weekly_values = {}
+    live_weekly_site_values = {}
     live_period_query = None
     if effective_reference is not None:
         # Keep operational deltas at weekly grain. The monthly view is rolled
@@ -597,6 +598,7 @@ def generator_trends(
             )
             SELECT
                 date_trunc('{period_unit}', snapshot_date::timestamp)::date AS period_start,
+                site_id,
                 site_name,
                 region,
                 CASE
@@ -616,6 +618,13 @@ def generator_trends(
                 continue
             key = (pd.Timestamp(row["period_start"]), region_name)
             live_weekly_values[key] = live_weekly_values.get(key, 0.0) + float(row["period_value"] or 0)
+            site_key = (
+                pd.Timestamp(row["period_start"]),
+                row["site_id"],
+                str(row["site_name"] or "Unknown site"),
+                region_name,
+            )
+            live_weekly_site_values[site_key] = live_weekly_site_values.get(site_key, 0.0) + float(row["period_value"] or 0)
 
     def reporting_month_for_week(week_start):
         # A week belongs to the month of its Sunday. For the in-progress week,
@@ -627,12 +636,17 @@ def generator_trends(
 
     if granularity == "week":
         live_values = live_weekly_values
+        live_site_values = live_weekly_site_values
     else:
         # Monthly operational values are the sum of weekly regional variances.
         live_values = {}
         for (week_start, region_name), value in live_weekly_values.items():
             key = (reporting_month_for_week(week_start), region_name)
             live_values[key] = live_values.get(key, 0.0) + value
+        live_site_values = {}
+        for (week_start, site_id, site_name, region_name), value in live_weekly_site_values.items():
+            key = (reporting_month_for_week(week_start), site_id, site_name, region_name)
+            live_site_values[key] = live_site_values.get(key, 0.0) + value
 
     if effective_reference is not None:
         baseline_values = {
@@ -663,6 +677,7 @@ def generator_trends(
     if granularity == "month":
         label_for_period = lambda value: value.strftime("%b-%y")
         accumulated_series = grouped.sum(axis=1).cumsum()
+        regional_accumulated = grouped.cumsum(axis=0)
     else:
         label_for_period = lambda value: f"Week {value.isocalendar().week} ({value.isocalendar().year})"
         # Group weekly accumulation by its reporting month, not Monday's month;
@@ -672,9 +687,26 @@ def generator_trends(
             index=grouped.index,
         )
         accumulated_series = grouped.sum(axis=1).groupby(week_reporting_months).cumsum()
+        regional_accumulated = pd.DataFrame(0.0, index=grouped.index, columns=ANALYTICS_REGIONS)
+        for region in ANALYTICS_REGIONS:
+            regional_accumulated[region] = grouped[region].groupby(week_reporting_months).cumsum()
 
     total_series = grouped.sum(axis=1)
     visible_periods = grouped.index[-12:]
+    latest_visible_period = visible_periods[-1] if len(visible_periods) else None
+    site_values = []
+    if latest_visible_period is not None:
+        site_values = [
+            {
+                "site_id": site_id,
+                "name": site_name,
+                "region": region_name,
+                "period": label_for_period(period),
+                "value": round(float(value), 2),
+            }
+            for (period, site_id, site_name, region_name), value in live_site_values.items()
+            if period == latest_visible_period
+        ]
 
     def number_list(series, index):
         return [round(float(value), 2) for value in series.reindex(index, fill_value=0).tolist()]
@@ -726,6 +758,11 @@ def generator_trends(
         ],
         "total": number_list(total_series, visible_periods),
         "accumulated": number_list(accumulated_series, visible_periods),
+        "regional_accumulated": [
+            {"name": region, "values": number_list(regional_accumulated[region], visible_periods)}
+            for region in ANALYTICS_REGIONS
+        ],
+        "site_values": site_values,
         "comparison": comparison,
         "baseline_cells_used": baseline_cells_used,
         "period_sources": [

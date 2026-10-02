@@ -34,6 +34,18 @@
         padding: 28px 18px 42px;
       }
 
+      /* Give charts extra horizontal room without changing the main dashboard. */
+      .container.analytics-wide {
+        max-width: none;
+        padding-right: 12px;
+        padding-left: 12px;
+      }
+
+      .container.analytics-wide #analyticsView {
+        padding-right: 16px;
+        padding-left: 16px;
+      }
+
       .header {
         background: linear-gradient(180deg, #0f172a 0%, #1f2a3d 100%);
         color: white;
@@ -382,6 +394,43 @@
         gap: 18px;
       }
 
+      .analytics-layout {
+        display: grid;
+        grid-template-columns: minmax(340px, 0.8fr) minmax(0, 1.2fr);
+        align-items: start;
+        gap: 18px;
+      }
+
+      .analytics-summary {
+        display: grid;
+        gap: 18px;
+        min-width: 0;
+      }
+
+      .analytics-summary table {
+        min-width: 0;
+      }
+
+      .analytics-summary th,
+      .analytics-summary td {
+        padding: 9px 8px;
+        font-size: 12px;
+      }
+
+      .analytics-summary tfoot td {
+        font-weight: 800;
+        background: #f1f5f9;
+      }
+
+      .summary-period-label {
+        margin: -5px 0 10px;
+        font-size: 12px;
+      }
+
+      @media (max-width: 1050px) {
+        .analytics-layout { grid-template-columns: 1fr; }
+      }
+
       .chart-card {
         min-width: 0;
         padding: 18px;
@@ -408,6 +457,17 @@
         width: auto;
         padding: 8px 12px;
         font-size: 12px;
+      }
+
+      .chart-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .chart-copy {
+        min-width: 34px;
+        padding: 8px;
       }
 
       .chart-container {
@@ -447,6 +507,16 @@
       }
 
       @media (max-width: 760px) {
+        .container.analytics-wide {
+          padding-right: 6px;
+          padding-left: 6px;
+        }
+
+        .container.analytics-wide #analyticsView {
+          padding-right: 10px;
+          padding-left: 10px;
+        }
+
         .upload-row,
         .toolbar {
           grid-template-columns: 1fr;
@@ -574,7 +644,7 @@
             <input id="captureHistoryFilter" type="date" />
           </div>
         </div>
-        <p class="muted">A fallback is a row whose <code>updated_at</code> is missing or whose Peru-local date differs from the capture date. This page only classifies stored rows; it does not fill or recalculate readings. In the capture process you described, the importer retains the last available reading when no new one arrives and writes that value into the daily tables. Download the Excel and inspect <code>updated_at</code> and <code>_last_reading</code> for traceability. If <code>updated_at</code> is empty, this row does not identify the original reading time. “Generators with alarms” counts generators with a non-empty alarms list.</p>
+        <p class="muted">“Rows without same-day update” means <code>updated_at</code> is missing or its Peru-local date differs from the capture date. This is a freshness indicator only; it does not prove that a value was copied from an earlier reading. Compare the exported metrics, <code>updated_at</code>, and <code>_last_reading</code> with prior captures to investigate the source. “Generators with alarms” counts generators with a non-empty alarms list.</p>
         <div class="table-wrap">
           <div id="historyCapturesTableContainer"></div>
         </div>
@@ -626,30 +696,53 @@
         </div>
 
         <p id="analyticsStatus" class="muted chart-status" aria-live="polite"></p>
-        <div class="chart-grid">
-          <article class="chart-card">
-            <div class="chart-card-header">
-              <h3 id="trendChartTitle">Generator running hours by month</h3>
-              <div style="display:flex;align-items:center;gap:8px;">
-                <span id="chartCopyStatus" class="muted" aria-live="polite"></span>
-                <button id="copyTrendChart" class="chart-download secondary" type="button" aria-label="Copy chart image" title="Copy chart image">
-                  <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="3" width="13" height="16" rx="2"></rect><path d="M16 21H5a2 2 0 0 1-2-2V8"></path></svg>
-                </button>
-                <button id="downloadTrendChart" class="chart-download secondary" type="button">Download PNG</button>
+        <div class="analytics-layout">
+          <aside class="analytics-summary">
+            <article class="chart-card">
+              <div class="chart-card-header">
+                <h3>DG Running</h3>
               </div>
-            </div>
-            <div class="chart-container">
-              <canvas id="trendChart"></canvas>
-              <div id="trendChartPinnedTooltip" class="chart-pinned-tooltip" aria-live="polite"></div>
-            </div>
-          </article>
-          <article id="comparisonChartCard" class="chart-card" hidden>
-            <div class="chart-card-header">
-              <h3 id="comparisonChartTitle">Snapshot comparison</h3>
-              <button id="downloadComparisonChart" class="chart-download secondary" type="button">Download PNG</button>
-            </div>
-            <div class="chart-container"><canvas id="comparisonChart"></canvas></div>
-          </article>
+              <p id="analyticsSummaryPeriod" class="muted summary-period-label"></p>
+              <div id="analyticsRegionSummary"></div>
+            </article>
+            <article class="chart-card">
+              <div class="chart-card-header">
+                <h3 id="topSitesTitle">Sites with Running H VAR &gt; 10</h3>
+              </div>
+              <div id="analyticsTopSites"></div>
+            </article>
+          </aside>
+          <div class="chart-grid">
+            <article class="chart-card">
+              <div class="chart-card-header">
+                <h3 id="trendChartTitle">Generator running hours by month</h3>
+                <div class="chart-actions">
+                  <span id="chartCopyStatus" class="muted" aria-live="polite"></span>
+                  <button id="copyTrendChart" class="chart-download chart-copy secondary" type="button" aria-label="Copy chart image" title="Copy chart image">
+                    <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="3" width="13" height="16" rx="2"></rect><path d="M16 21H5a2 2 0 0 1-2-2V8"></path></svg>
+                  </button>
+                  <button id="downloadTrendChart" class="chart-download secondary" type="button">Download PNG</button>
+                </div>
+              </div>
+              <div class="chart-container">
+                <canvas id="trendChart"></canvas>
+                <div id="trendChartPinnedTooltip" class="chart-pinned-tooltip" aria-live="polite"></div>
+              </div>
+            </article>
+            <article id="comparisonChartCard" class="chart-card" hidden>
+              <div class="chart-card-header">
+                <h3 id="comparisonChartTitle">Snapshot comparison</h3>
+                <div class="chart-actions">
+                  <span id="comparisonChartCopyStatus" class="muted" aria-live="polite"></span>
+                  <button id="copyComparisonChart" class="chart-download chart-copy secondary" type="button" aria-label="Copy chart image" title="Copy chart image">
+                    <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="3" width="13" height="16" rx="2"></rect><path d="M16 21H5a2 2 0 0 1-2-2V8"></path></svg>
+                  </button>
+                  <button id="downloadComparisonChart" class="chart-download secondary" type="button">Download PNG</button>
+                </div>
+              </div>
+              <div class="chart-container"><canvas id="comparisonChart"></canvas></div>
+            </article>
+          </div>
         </div>
       </section>
     </div>
@@ -666,6 +759,8 @@
       const analyticsReferenceDate = document.getElementById('analyticsReferenceDate');
       const analyticsStatus = document.getElementById('analyticsStatus');
       const comparisonChartCard = document.getElementById('comparisonChartCard');
+      const analyticsRegionSummary = document.getElementById('analyticsRegionSummary');
+      const analyticsTopSites = document.getElementById('analyticsTopSites');
       let trendChartInstance = null;
       let comparisonChartInstance = null;
       let allGenerators = [];
@@ -883,6 +978,100 @@
         return true;
       }
 
+      function renderAnalyticsSummary(chartData, companionData) {
+        const runningData = chartData.metric === 'running_hours' ? chartData : companionData;
+        const startsData = chartData.metric === 'num_starts' ? chartData : companionData;
+        const periodLabel = chartData.labels[chartData.labels.length - 1];
+        document.getElementById('analyticsSummaryPeriod').textContent = periodLabel
+          ? `Latest displayed period: ${periodLabel}. Regional values are period VARs; accumulated is the running total.`
+          : 'No period data available.';
+
+        const readSeriesValue = (data, collection, region) => {
+          if (!data || !periodLabel || !Array.isArray(data.labels)) return null;
+          const periodIndex = data.labels.indexOf(periodLabel);
+          const series = data[collection]?.find((item) => item.name === region);
+          if (periodIndex < 0 || !series || series.values[periodIndex] === undefined) return null;
+          const value = Number(series.values[periodIndex]);
+          return Number.isFinite(value) ? value : null;
+        };
+        const formatValue = (value) => value === null
+          ? '-'
+          : value.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+        const regions = ['San Martin', 'Arequipa', 'La Libertad', 'Ancash'];
+        const summaryRows = regions.map((region) => ({
+          region,
+          starts: readSeriesValue(startsData, 'sites', region),
+          running: readSeriesValue(runningData, 'sites', region),
+          accumulated: readSeriesValue(runningData, 'regional_accumulated', region),
+        }));
+        const sumValues = (key) => {
+          const values = summaryRows.map((row) => row[key]).filter((value) => value !== null);
+          return values.length ? values.reduce((sum, value) => sum + value, 0) : null;
+        };
+
+        const summaryTable = document.createElement('table');
+        summaryTable.innerHTML = '<thead><tr><th>Region</th><th>Genset turned on (Num Starts)</th><th>Running Hours</th><th>Accumulated</th></tr></thead>';
+        const summaryBody = document.createElement('tbody');
+        summaryRows.forEach((row) => {
+          const tr = document.createElement('tr');
+          [row.region, formatValue(row.starts), formatValue(row.running), formatValue(row.accumulated)]
+            .forEach((value) => {
+              const td = document.createElement('td');
+              td.textContent = value;
+              tr.appendChild(td);
+            });
+          summaryBody.appendChild(tr);
+        });
+        summaryTable.appendChild(summaryBody);
+        const summaryFooter = document.createElement('tfoot');
+        const totalRow = document.createElement('tr');
+        ['TOTAL', formatValue(sumValues('starts')), formatValue(sumValues('running')), formatValue(sumValues('accumulated'))]
+          .forEach((value) => {
+            const td = document.createElement('td');
+            td.textContent = value;
+            totalRow.appendChild(td);
+          });
+        summaryFooter.appendChild(totalRow);
+        summaryTable.appendChild(summaryFooter);
+        analyticsRegionSummary.replaceChildren(summaryTable);
+
+        const runningSites = (runningData?.site_values || [])
+          .filter((site) => site.period === periodLabel && Number(site.value) > 10)
+          .sort((a, b) => Number(b.value) - Number(a.value));
+        const startsBySite = new Map((startsData?.site_values || [])
+          .filter((site) => site.period === periodLabel)
+          .map((site) => [String(site.site_id), Number(site.value)]));
+        const topSites = runningSites.slice(0, 10);
+        const topTable = document.createElement('table');
+        topTable.innerHTML = '<thead><tr><th>Region</th><th>Site</th><th>Running Hrs</th><th>Times</th></tr></thead>';
+        const topBody = document.createElement('tbody');
+        if (!topSites.length) {
+          const tr = document.createElement('tr');
+          const td = document.createElement('td');
+          td.colSpan = 4;
+          td.className = 'muted';
+          td.textContent = runningData
+            ? 'No operational site exceeded 10 running hours in this period.'
+            : 'Site summary is unavailable.';
+          tr.appendChild(td);
+          topBody.appendChild(tr);
+        } else {
+          topSites.forEach((site) => {
+            const tr = document.createElement('tr');
+            [site.region, site.name, formatValue(Number(site.value)), formatValue(startsBySite.get(String(site.site_id)) ?? null)]
+              .forEach((value) => {
+                const td = document.createElement('td');
+                td.textContent = value;
+                tr.appendChild(td);
+              });
+            topBody.appendChild(tr);
+          });
+        }
+        topTable.appendChild(topBody);
+        analyticsTopSites.replaceChildren(topTable);
+        document.getElementById('topSitesTitle').textContent = `Sites with Running H VAR > 10 (Top ${topSites.length})`;
+      }
+
       async function loadAnalyticsCharts() {
         if (typeof Chart === 'undefined') {
           analyticsStatus.textContent = 'Chart.js could not be loaded. Check the network connection and try again.';
@@ -910,11 +1099,24 @@
               trendChartInstance = null;
             }
             comparisonChartCard.hidden = true;
+            analyticsRegionSummary.innerHTML = '';
+            analyticsTopSites.innerHTML = '';
             analyticsStatus.textContent = 'No historical snapshot data is available for this selection.';
             return;
           }
 
           renderTrendChart(data);
+          let companionData = null;
+          try {
+            const companionParams = new URLSearchParams(params);
+            companionParams.set('metric', data.metric === 'running_hours' ? 'num_starts' : 'running_hours');
+            companionParams.set('comparison_period', 'none');
+            if (data.reference_date) companionParams.set('reference_date', data.reference_date);
+            companionData = await fetchJson(`${API_BASE}/analytics/generator-trends?${companionParams.toString()}`);
+          } catch (summaryError) {
+            console.warn('Could not load the complementary metric for the chart summary:', summaryError);
+          }
+          renderAnalyticsSummary(data, companionData);
           const comparisonVisible = analyticsComparison.value !== 'none'
             ? renderComparisonChart(data.comparison, data.metric_label)
             : (comparisonChartCard.hidden = true, false);
@@ -925,6 +1127,9 @@
           if (analyticsComparison.value !== 'none' && !comparisonVisible) {
             analyticsStatus.textContent += ' A previous snapshot was not available for the selected comparison.';
           }
+          if (!companionData) {
+            analyticsStatus.textContent += ' Summary values for the other counter could not be loaded.';
+          }
         } catch (error) {
           analyticsStatus.textContent = `Could not load chart data: ${error.message}`;
           comparisonChartCard.hidden = true;
@@ -934,6 +1139,7 @@
       function showAnalyticsView(showAnalytics) {
         mainView.hidden = showAnalytics;
         analyticsView.hidden = !showAnalytics;
+        analyticsView.closest('.container').classList.toggle('analytics-wide', showAnalytics);
         if (showAnalytics) loadAnalyticsCharts();
       }
 
@@ -945,8 +1151,8 @@
         link.click();
       }
 
-      async function copyChartImage(chart) {
-        const status = document.getElementById('chartCopyStatus');
+      async function copyChartImage(chart, statusId = 'chartCopyStatus') {
+        const status = document.getElementById(statusId);
         if (!chart) return;
         if (!navigator.clipboard || typeof ClipboardItem === 'undefined') {
           status.textContent = 'Image copy needs HTTPS or localhost.';
@@ -1792,7 +1998,7 @@
             { key: 'captured_at', label: 'Capture time' },
             { key: 'generator_count', label: 'Generators' },
             { key: 'readings_today', label: 'Readings from that day' },
-            { key: 'fallback_count', label: 'Fallback readings' },
+            { key: 'fallback_count', label: 'Rows without same-day update' },
             { key: 'generators_with_alarms', label: 'Generators with alarms' },
             { key: 'actions', label: 'Actions' },
           ];
@@ -1952,6 +2158,7 @@
       document.getElementById('backToMainButton').addEventListener('click', () => showAnalyticsView(false));
       document.getElementById('refreshAnalyticsButton').addEventListener('click', loadAnalyticsCharts);
       document.getElementById('copyTrendChart').addEventListener('click', () => copyChartImage(trendChartInstance));
+      document.getElementById('copyComparisonChart').addEventListener('click', () => copyChartImage(comparisonChartInstance, 'comparisonChartCopyStatus'));
       document.getElementById('downloadTrendChart').addEventListener('click', () => {
         const metric = analyticsMetric.value === 'running_hours' ? 'running-hours' : 'number-of-starts';
         downloadChartImage(trendChartInstance, `generator-${metric}-${analyticsGranularity.value}.png`);

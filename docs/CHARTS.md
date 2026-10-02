@@ -1,28 +1,30 @@
-# Historical charts: implementation guide
+# Historical charts: implementation and data rules
 
 ## Purpose and entry point
 
-The charts feature provides a historical view of generator counter readings without replacing the operational table. It is a second view in the existing single-page frontend:
+The charts view provides regional trends and raw snapshot comparisons alongside the operational dashboard:
 
 1. Select **Charts & comparison** in the application header.
-2. Configure the metric, grouping, reference date, and optional snapshot comparison.
-3. Use **Back to dashboard** to return to the generator table and upload sections.
+2. Choose a metric, grouping, reference date, and optional comparison window.
+3. Use **Back to dashboard** to return to the main view.
 
-The frontend is in `public/index.html`; the endpoint, SQL counter-delta query, and response assembly are in `app/main.py`. The endpoint reads `generators`, `sites`, and `region_historical_baseline`; it does not create a new analytics table. Chart.js and its DataLabels plugin load from jsDelivr.
+The frontend is in `public/index.html`; the endpoint and calculations are in `app/main.py`. Trend and comparison data come from `public.generator_daily_history`. The chart endpoint does not read `generator_d0`, `generators`, or uploaded Excel records. `public.region_historical_baseline` supplements periods without operational cells; the table and its required columns must exist, even if it is empty. No chart-specific table is created.
 
-## User controls
+Chart.js and Chart.js DataLabels load from jsDelivr.
+
+## Controls and actions
 
 | Control | Values | Effect |
 | --- | --- | --- |
-| Metric | Running hours, Number of starts | Selects the cumulative counter used for both charts. |
-| Group by | Month, Week | Buckets counter changes by calendar month or ISO week. |
-| Compare snapshots | None, DoD, WoW, 6D Back, MoM | Shows or hides a second chart comparing snapshot totals by region. |
-| Reference date | Any date | Uses data on or before that date. Blank means latest available snapshot. |
-| Refresh charts | Button | Re-fetches data using the current controls. |
+| Metric | Running hours, Number of starts | Selects the cumulative counter used in the trend and comparison. |
+| Group by | Month, Week | Selects monthly rollup or ISO-week periods for the trend. |
+| Compare snapshots | None, DoD, WoW, 6D Back, MoM | Shows or hides the grouped-bar comparison of raw totals. |
+| Reference date | Any date | Limits history to this date. Blank chooses the latest relevant operational/baseline period. |
+| Refresh charts | Button | Requests the endpoint using the selected controls. |
 
-Both charts have a **Download PNG** button. The trend chart is available when there is trend data; the comparison chart appears only when comparison is enabled and a prior snapshot can be found.
+The trend has **Download PNG** and **Copy chart image** actions. Copying requires browser clipboard support in a secure context such as HTTPS or localhost. Its value panel updates on hover; clicking a plot position pins that period's values, and clicking the same period again clears the pin. The comparison bar chart has a PNG download.
 
-## Request and response contract
+## API contract
 
 The frontend calls:
 
@@ -30,7 +32,7 @@ The frontend calls:
 GET /analytics/generator-trends
     ?metric=running_hours
     &granularity=month
-    &reference_date=2026-09-24
+    &reference_date=2026-09-30
     &comparison_period=WoW
 ```
 
@@ -41,110 +43,127 @@ Parameters:
 - `reference_date`: optional ISO date (`YYYY-MM-DD`).
 - `comparison_period`: `none`, `DoD`, `WoW`, `6DayBack`, or `MoM`.
 
-Unsupported metric, granularity, or comparison period returns HTTP 400. If `region_historical_baseline` or one of its required columns is unavailable, the endpoint returns HTTP 503 with a schema-oriented error. An empty database or a date range without readings and without baseline rows returns empty chart arrays rather than fabricated data.
+Unsupported values return HTTP 400. Missing `region_historical_baseline` or required columns returns HTTP 503. With no usable history and no baseline rows, the endpoint returns empty chart arrays.
 
-The response contains:
+Response fields:
 
-- `labels`: the latest 12 month or week labels through the reference date.
-- `sites`: one `{name, values}` series for each of the four canonical regions: `San Martin`, `Arequipa`, `La Libertad`, and `Ancash`. The key remains named `sites` for compatibility with the chart renderer.
-- `total`: horizontal sum of the four regional values for each period.
-- `accumulated`: monthly charts accumulate monthly totals across available history. Weekly charts sum weekly totals and restart at each reporting-month boundary. A week is assigned by its Sunday; the current incomplete week is assigned using the reference date. Both are calculated before the 12-label display window is sliced.
-- `comparison`: `null` when comparison is off; otherwise, regional labels, actual snapshot dates, and current/previous raw counter totals.
-- `baseline_cells_used`: number of missing `(period, region)` cells filled from the historical baseline.
-- `period_sources`: for each displayed period and region, identifies whether the value came from `operational`, `baseline`, or neither (`empty`).
+- `labels`: up to the latest 12 month or ISO-week labels through the effective reference date.
+- `sites`: four `{name, values}` regional series (the `sites` key is retained for frontend compatibility): `San Martin`, `Arequipa`, `La Libertad`, and `Ancash`.
+- `total`: horizontal sum of the four regional period values.
+- `accumulated`: monthly cumulative total or weekly total accumulated within each reporting month.
+- `regional_accumulated`: per-region counterpart to `accumulated`, using the same monthly continuous or weekly reporting-month reset rule.
+- `site_values`: site-level operational deltas for the latest visible period for the requested metric. Baseline cells have no site-level breakdown and are not represented here.
+- `comparison`: `null` when comparison is off; otherwise actual selected snapshot dates, region names, and raw previous/current metric totals.
+- `baseline_cells_used`: number of missing operational `(period, region)` cells supplied by baseline data across the full timeline.
+- `period_sources`: source label (`operational`, `baseline`, or `empty`) for each visible period and region.
 
-## Backend data flow and rules
+## Database and identity rules
 
-`generator_trends` reads `public.generator_daily_history`, mapped to the application's `public.sites` by normalized `site_name` so source-system IDs are not mistaken for local site IDs. The main dashboard reads this history and, when available in the same database, overlays `public.generator_d0` for the current snapshot. PostgreSQL calculates live counter deltas with window functions. Python maps those rows to canonical regions, combines them with the manual baseline, and assembles the timeline. The same history snapshots are prepared in pandas for the raw-snapshot comparison chart.
+The trend SQL reads `public.generator_daily_history` and left-joins `public.sites` using:
 
-The chart grouping key is the canonical region rather than the individual site name. The endpoint first maps `Site.region`; if the field is blank or unrecognized, it infers the region from `site_name`. It recognizes the full names and common codes `SM`, `AR`, `LL`, and `AN`, and normalizes accents and casing. Sites that do not map to one of the four target regions are skipped and written to the application log. Startup also adds the nullable `sites.region` column to older databases if it is missing.
-
-### Deduplication
-
-The historical table is keyed by snapshot date and device. When rows from D0 and history overlap, the dashboard prefers D0 for that date/device. The trend query also ranks duplicate mapped rows and keeps the latest capture for each:
-
-```text
-(local site_id, device_type, device_index, snapshot_date)
+```sql
+lower(trim(s.site_name)) = lower(trim(h.site_name))
 ```
 
-The identity is mapped through the local site name and uses the source device type and index. Keep this key aligned with the source table's primary key if that identity changes.
+When a site name matches, the local `sites.site_id` and its region are preferred. Otherwise the query falls back to the source row's `site_id` and region. Ensure names map uniquely and consistently; source and local IDs may belong to different databases. The frontend/database integration does not create site records during chart reads.
 
-### Period trend values
-
-`running_hours` and `num_starts` are cumulative counters. After deduplication, PostgreSQL calculates `LAG(metric)` for each generator identity ordered by `snapshot_date`. Each reading contributes the change since that generator's previous snapshot, assigned to the month or ISO week containing the later snapshot:
+Only rows where `device_type = 'generator'` and `snapshot_date` is present are candidates. Rows are deduplicated by:
 
 ```text
-period_value = current reading - previous reading
+(mapped site_id, device_type, device_index, snapshot_date)
 ```
 
-The first known reading contributes zero because it has no previous value for comparison. If the counter decreases, the code treats that as a reset and uses the new reading as usage since reset. Missing days do not cause repeated addition of the counter: the next reading is compared with the preceding available snapshot, and that difference is assigned once to the later snapshot's period.
+The row with the latest `captured_at` wins (with source `site_id` as a tie-breaker). The same device identity `(site_id, device_type, device_index)` is used for counter differences over time. Keep this identity aligned with the source history primary key.
 
-The endpoint maps each row to its canonical region and first sums live deltas by `(week_start, region)`. The weekly chart uses those weekly variances directly. The monthly chart is rolled up from the same weekly regional variances; it does not add raw snapshot readings. A week belongs to the month containing its Sunday, keeping a cross-month week together. For the current incomplete week, the reference date caps the week end, so Week 40 on September 28 is counted in September.
+The endpoint maps region codes and names to the four canonical labels. It first uses `region`, then attempts to infer a region from `site_name`. Unrecognized rows are omitted from regional sums and written to the application log.
 
-Source selection is cell-by-cell after this weekly calculation (and monthly rollup where applicable):
+`region_historical_baseline` requires:
 
-1. Use the operational sum when that period and region have generator readings.
-2. Otherwise, use the matching `delta_value` from `region_historical_baseline`.
-3. Use zero only when neither source has that period/region cell.
+| Column | Use |
+| --- | --- |
+| `period_type` | `month`/`monthly` or `week`/`weekly` |
+| `period_label` | Calendar month or ISO week label parsed by the backend |
+| `region_name` | Canonical region name or supported alias |
+| `metric_name` | Running-hours or starts metric identifier |
+| `delta_value` | Precomputed regional period variance |
 
-The baseline columns are `period_type`, `period_label`, `region_name`, `metric_name`, and `delta_value`. Operational and baseline values are never added together for the same cell. `period_sources` identifies the selected source for each displayed period and region; `baseline_cells_used` counts baseline cells across the complete timeline, not just September or the currently visible data source.
+Monthly labels accepted include `Feb-26`, `Feb 2026`, and `2026-02`. Weekly labels should include the ISO year, such as `Week 33 (2026)` or `2026-W33`. A week label without a year is interpreted using the reference ISO year and is unsafe for multi-year baselines.
 
-For the September 2026 data reviewed during this change, the manual baseline rows total **429.6** running hours, while the operational deltas from daily generator snapshots total about **460.068**. Because all four regions have operational values for September, the chart uses those operational values and ignores the September baseline cells. The API previously returned an incorrect value near **74,572**. The trend calculation was moved to an explicit PostgreSQL `ROW_NUMBER()` + `LAG()` query matching the validated SQL calculation; the corrected chart now shows the operational result rather than accumulating full daily readings.
+## Operational counter deltas
 
-Month and week periods from operational data and baseline data are merged into one continuous timeline. The endpoint reindexes that range; any period/region cell absent from both sources is zero. `GE Total hours` (or `GE Total starts`) is the horizontal sum across the four regions per period. The monthly `Accumulated` series is a continuous running sum of monthly totals. The weekly `Accumulated` series is a running sum of weekly totals that resets when the reporting month changes. For example, the supplied Week 36–39 values produce `149.0 + 193.8 + 86.8 + 18.0 = 447.6` at Week 39; Week 40 adds its current weekly variance to that September total. Calculations cover the complete merged history through the reference date even though the trend chart displays only the latest 12 labels.
+`running_hours` and `num_starts` are cumulative counters. PostgreSQL applies `LAG(metric)` per generator identity, ordered by `snapshot_date`, after filtering out null metric values. Each non-null reading contributes:
 
-Monthly baseline labels can use labels such as `Feb-26` or `2026-02`. Weekly labels can include a year (for example, `Week 33 (2026)` or `2026-W33`). If a weekly label omits its year, the endpoint interprets it in the ISO year of the reference date; include a year in `period_label` when the baseline spans multiple years.
+```text
+period variance = current reading - previous available reading
+```
 
-### Snapshot comparison values
+- The first available non-null reading contributes zero because it has no prior value.
+- If the counter decreases, it is treated as a reset and the current value is used as the variance since reset.
+- A null metric row is excluded from the `LAG` input; it is not treated as zero. The next available non-null reading is compared with the preceding available non-null reading. If snapshots were missed, that multi-day change is assigned to the later reading's week.
+- The application does not interpolate missing snapshots.
 
-Comparison uses raw counter totals, rather than the period differences used in the trend chart:
+The SQL first groups device variances by `(week_start, region)`. For weekly grouping, these regional weekly values are charted directly. For monthly grouping, the endpoint sums those same weekly regional variances; it does not sum raw daily counter values.
 
-1. The active snapshot is the latest available snapshot on or before `reference_date` (or the latest snapshot when no date is supplied).
-2. The endpoint offsets that date by the chosen comparison window: DoD −1 day, WoW −7 days, 6D Back −6 days, or MoM −1 month.
-3. For each side, it selects the latest snapshot on or before its target date.
-4. It sums the chosen metric by region at each selected snapshot.
+### Week-to-month assignment
 
-The response reports the actual snapshot dates found. If there is no snapshot at or before the previous target, the comparison chart is omitted and the frontend reports that no previous snapshot was available.
+Weeks start on Monday (`date_trunc('week', ...)`). A week is assigned to the month containing its Sunday. For the current incomplete week, Sunday is capped at the effective reference date. For example, the week beginning 2026-09-28 remains assigned to September when the reference date is 2026-09-30. This also puts the week beginning 2026-08-31 into September because its Sunday is 2026-09-06.
 
-## Frontend rendering and visual structure
+### Baseline merge, totals, and accumulation
 
-The charts view is part of the same HTML document, not a separate route. `mainView` contains the operational dashboard, while `analyticsView` contains the historical controls and charts. The header shortcut hides one view and shows the other.
+The backend merges operational and baseline values per period and region:
 
-The trend uses a responsive Chart.js line chart with Chart.js DataLabels:
+1. Use the operational cell when operational data produced that `(period, region)` cell.
+2. Otherwise use the matching baseline `delta_value`.
+3. If neither source has the cell, the chart's reindexed regional value is zero.
 
-- Each of the four regions is a separate line, assigned colors from a fixed palette.
-- `GE Total hours` (or `GE Total starts`) is a solid blue line.
-- `Accumulated` is a dashed green line.
-- `Accumulated` uses a separate right-side scale so its cumulative magnitude does not determine the scale for the regional period deltas.
-- Both vertical scales start at zero and add headroom (`8%` for period deltas, `10%` for accumulated). Extra top and right chart padding keeps labels near the final point inside the canvas.
-- Nonzero points show their values directly on the chart; overlapping labels are automatically suppressed and remain available in the tooltip.
-- The legend contains six lines and sits below the plot; hovering shares a tooltip across the same period.
-- The vertical axis starts at zero and names the selected metric.
-- Month labels use `Mon-YY`; week labels include the ISO week and year to disambiguate year boundaries.
+Operational and baseline values are not added together for one cell. This is a cell-level fallback: a September operational value for one region does not prevent a baseline value from filling a missing September cell for another region.
 
-When comparison is enabled and data exists, the second chart is a grouped bar chart. It displays previous snapshot totals in light blue and current snapshot totals in blue, with one category per region. Its title includes the actual dates selected by the backend.
+`GE Total hours` or `GE Total starts` is the sum of the four regional period values. Missing cells are initialized to zero in the chart dataframe and JSON arrays; the endpoint does not preserve absent period/region cells as `null`.
 
-The chart cards use responsive containers. PNG downloads use each Chart.js instance's `toBase64Image()` output; trend filenames include metric and grouping, while comparison filenames include the metric.
+- **Monthly accumulated:** cumulative sum of monthly GE totals through the full available timeline. A September point therefore includes January through September, not September alone.
+- **Weekly accumulated:** cumulative sum of weekly GE totals, grouped by assigned reporting month. It resets when that reporting month changes. For September, the Week 36–39 example totals `149.0 + 193.8 + 86.8 + 18.0 = 447.6`; Week 40 adds its current weekly variance.
+
+Accumulation is calculated before the chart is sliced to its latest 12 labels.
+
+## Snapshot comparison and missing coverage
+
+Snapshot comparison uses raw counter totals; it is separate from the period-delta calculation:
+
+1. The active date is the latest operational snapshot on or before the effective reference date.
+2. The backend offsets that date by DoD (−1 day), WoW (−7 days), 6D Back (−6 days), or MoM (−1 month).
+3. For the prior side, it selects the latest available snapshot on or before that target date.
+4. It sums non-null metric values by region at each selected snapshot.
+
+The response includes the actual dates selected. Missing devices are not matched across the two sides and are not imputed: each regional total includes only the devices with a usable metric in that snapshot. Unequal coverage can therefore make raw current and previous totals look different even when some of that difference comes from missing devices. Check the capture coverage before interpreting snapshot totals as variance. The comparison chart displays the two totals; it does not calculate device-level VAR.
+
+## Regional summary and site list
+
+The charts view makes a second request for the other counter so it can show both metrics regardless of which metric is plotted:
+
+- **Genset turned on (Num Starts):** the regional `num_starts` period variance for the latest displayed period.
+- **Running Hours:** the regional `running_hours` period variance for that period.
+- **Accumulated:** per-region running-hours accumulation using the chart's grouping rule. The total row is the sum of the regional values.
+- **Sites with Running Hrs VAR > 10:** up to ten operational sites sorted by descending site-level `running_hours` variance for that same period. The `Times` column shows the site's `num_starts` variance when available.
+
+Period values follow the same weekly-delta and monthly-week-rollup rules as the trend chart. The site list can only use operational rows from `generator_daily_history`; `region_historical_baseline` has no site dimension and does not generate site rows. If the complementary metric request fails, values from that metric display as unavailable while the primary chart remains available.
 
 ## Frontend implementation map
 
-Relevant elements and functions in `public/index.html`:
+Relevant code in `public/index.html`:
 
-- `openAnalyticsButton`, `backToMainButton`: switch between dashboard and charts view.
+- `openAnalyticsButton`, `backToMainButton`: switch views.
 - `analyticsMetric`, `analyticsGranularity`, `analyticsComparison`, `analyticsReferenceDate`: request controls.
-- `loadAnalyticsCharts()`: builds query parameters, fetches the endpoint, updates the status, and handles empty/error states.
-- `renderTrendChart(data)`: creates the site, total, and accumulated line datasets.
-- `renderComparisonChart(comparison, metricLabel)`: builds the previous/current grouped bars.
-- `downloadChartImage(chart, filename)`: downloads the selected chart as PNG.
+- `loadAnalyticsCharts()`: builds the request, updates status, and handles empty/error responses.
+- `renderTrendChart(data)`: creates regional, total, and accumulated series and the pinned value panel.
+- `renderAnalyticsSummary(chartData, companionData)`: combines both metric responses into the latest-period regional summary and operational site list.
+- `renderComparisonChart(comparison, metricLabel)`: renders previous/current grouped bars.
+- `downloadChartImage(chart, filename)`: exports a chart as PNG.
+- `copyChartImage(chart)`: copies the trend canvas PNG to the clipboard.
 
-Chart.js and Chart.js DataLabels are included before the inline application script using jsDelivr. Chart.js must load for the charts view to work; if the DataLabels plugin alone is unavailable, the chart still renders but point labels are omitted.
+## Maintenance notes
 
-## Changes and maintenance
-
-- Add any new selectable metric to both the frontend selector and the backend `metric_labels` whitelist. Only cumulative counters can use the current difference calculation without further changes. Add matching `metric_name` values to the baseline table as needed.
-- If adding an instantaneous metric (for example, fuel percentage or voltage), define whether each period should use average, minimum/maximum, or the last reading. Do not apply counter differences to it.
-- If changing generator identity or duplicate resolution, update the deduplication key and keep the main table's comparison identity consistent.
-- If changing the comparison windows, update the API validation, target-date calculation, and frontend options together.
-- Keep baseline `period_type`, `period_label`, `region_name`, `metric_name`, and `delta_value` consistent with the parser and the four canonical region names. Operational values take priority over baseline values for the same period and region.
-- The endpoint reads the snapshot history for both the SQL trend calculation and the pandas raw-snapshot comparison. For a much larger history, consider reducing comparison rows in SQL or caching the prepared series.
-- Since period differences are assigned to the date of the later snapshot, a long gap between imports places the whole change in that later month/week. The chart does not interpolate missing snapshots.
+- Add a selectable metric to both the frontend selector and backend whitelist. Counter metrics can use the existing difference logic; instantaneous metrics require a separate aggregation rule.
+- If source identity, deduplication, or site-name mapping changes, update this document and the dashboard identity rules together.
+- If comparison windows change, update endpoint validation, date offsets, and frontend options together.
+- Keep baseline period labels and names aligned with the parser and canonical regions. Operational values take precedence only for the same period/region cell.
+- The endpoint currently loads the matching history into memory per request. If volume grows substantially, consider database-side aggregation or caching.

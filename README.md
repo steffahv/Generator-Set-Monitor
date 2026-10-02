@@ -1,216 +1,111 @@
 # Generator Set Monitor
 
-A FastAPI application for ingesting operational Excel/CSV export data and presenting a generator monitoring dashboard with site mapping, snapshot comparison, and filtered inspection.
+FastAPI and PostgreSQL application for reviewing generator readings, daily capture coverage, snapshot comparisons, and historical regional trends.
 
-## Purpose
+## Active data architecture
 
-This project is designed to:
+The active dashboard reads the source-system capture tables in the application's PostgreSQL database (`myappge`):
 
-- import generator telemetry from Excel/CSV files
-- normalize raw field names and values before saving them
-- maintain a manual master `sites` table as the source of truth
-- match uploaded rows to sites using `router_ip`
-- persist generated operational data in `generators`
-- compare snapshots by date to calculate variance between selected periods
-- expose a compact, filterable dashboard for operator review
+- `public.generator_daily_history` stores the daily generator snapshots used for historical review and charts.
+- `public.generator_d0` stores the latest capture and is used by the main dashboard when present.
+- `public.sites` is the application's site and region reference table. Capture rows are matched by normalized site name (`lower(trim(site_name))`) to obtain the local `site_id` and region. If no local site matches, the current reader falls back to the source row's `site_id`; it does not create a `sites` record.
+- `public.region_historical_baseline` stores manually prepared monthly or weekly regional deltas for periods without operational history. It is required by the charts endpoint, even if it has no matching rows for a requested period.
 
-## Stack
+The application reads these capture tables; the external API/import process is responsible for inserting and maintaining their rows. The application does not create or backfill `generator_d0` or `generator_daily_history`. These source tables are expected to contain at least:
 
-- Backend: FastAPI
-- ORM: SQLAlchemy
-- Database: PostgreSQL 16
-- Parsing: pandas + openpyxl
-- Frontend: static HTML/JavaScript served by FastAPI
-- Local server: Uvicorn
-- Container support: Docker Compose
+- `snapshot_date`, `captured_at`, `site_id`, `device_type`, `device_index`, `site_name`, `region`, `updated_at`
+- Counter and telemetry columns including `running_hours`, `num_starts`, `fuel_level`, `total_fuel_consumption`, `mains_voltage_l1n`, `load_current_l1`, state fields, `alarms`, and `_last_reading`
 
-## Current data model
+The supplied schema uses `(site_id, device_type, device_index)` as the `generator_d0` key and `(snapshot_date, site_id, device_type, device_index)` as the daily-history key. Keep those identities stable in the ingestion process. `snapshot_date` is the capture's reporting date; `captured_at` is when the capture batch was written; `updated_at` records the source reading time when available. Do not treat these timestamps as interchangeable.
 
-The app follows a master/detail pattern:
+The current source schema also has checks requiring generator-only rows, `snapshot_date` to match the Lima-local date of `captured_at`, and any non-null `updated_at` to be on that same date and no later than `captured_at`. `alarms` must be null or a JSON array; `_last_reading` must be null or a JSON object. The check named `generator_fallback_only_without_today` is `updated_at IS NULL OR _last_reading IS NULL`; it does not prove that counter values were copied from a prior reading.
 
-- `sites`: manual master registry of physical sites and router metadata
-- `generators`: operational generator records imported from uploaded files
-- `excel_uploads`: upload metadata, audit history, and retained source files
-- `raw_data_rows`: raw row payloads as saved from each file
-- `rectifiers`: defined for future extension, not the active functional scope
+### Dashboard source and duplicate handling
 
-Important operational rule:
+`GET /generators` and `GET /sites/{site_id}/generators` read daily history and, when the table exists, union in D0. For duplicate device/date rows, the reader prefers D0 over history, then the later capture time within that source. The API response keeps the dashboard's existing field names (`site`, `reg`, `ip`, and so on) while mapping source columns such as `site_name`, `region`, and `device_ip`.
 
-- `sites` is authoritative for site identity
-- `generators` stores imported operational state
-- uploaded files do not create new site records automatically
+The dashboard's comparison table uses the reference-date snapshot and the selected target date. A generator's VAR is calculated only when both snapshots contain numeric values for that metric. If either side is missing, the available side's reading remains visible and VAR is left blank. In comparison mode, the displayed device rows are the deduplicated union of devices found on either date.
 
-## Core behavior
+The dashboard no longer presents an Excel upload form. Legacy tables and routes for manual uploads (`generators`, `excel_uploads`, `raw_data_rows`, and `/upload-excel`, `/uploads`) remain in the backend for compatibility, but they are not the source for the active dashboard, daily capture history, or charts. Uploading through the legacy endpoint does not insert into `generator_daily_history` or `generator_d0`.
 
-### Import flow
+## Daily capture history
 
-1. The user uploads an Excel or CSV file from the UI.
-2. Upload metadata and original file bytes are stored in `excel_uploads`.
-3. Each row is kept in `raw_data_rows` as raw JSON for traceability.
-4. Headers and values are normalized before persistence.
-5. Rows are matched to `sites` via `router_ip`.
-6. Valid matches are saved into `generators`.
-7. Invalid or unmatched rows are ignored rather than creating inconsistent records.
+The **Daily capture history** view calls `GET /history-captures`. It shows one row per `snapshot_date` in `generator_daily_history`, ordered newest first, with generator count, capture time, reading freshness counts, and generators with non-empty alarm arrays. The initial list shows the newest five dates; **Show more** expands it. A date filter narrows the list.
 
-### Snapshot comparison
+The count **Rows without same-day update** is defined as:
 
-The dashboard supports date-based variance analysis using snapshot dates derived from the import file. The current logic:
+```text
+updated_at IS NULL
+OR (updated_at AT TIME ZONE 'America/Lima')::date <> snapshot_date
+```
 
-- uses the latest available snapshot as the default active date
-- allows explicit reference date selection when needed
-- compares current vs previous snapshot using selected variance windows such as DoD, WoW, MoM
-- shows a calculated `VAR` column in the main table without duplicating the base metric unnecessarily
+This is a freshness classification only. It does not prove that a metric was copied from an older reading, and the view does not fill or recalculate values. To trace a row, download the capture using `GET /history-captures/{snapshot_date}/download` and inspect its metric fields, `updated_at`, and `_last_reading`. If `updated_at` is null, that row does not identify the original reading time. The **Current** badge is based on the maximum generator `snapshot_date` in `generator_d0`.
 
-## API surface
+The Excel download is generated from the selected date's rows in `generator_daily_history`; JSON fields (`alarms` and `_last_reading`) are exported as text. Timestamp fields are exported as ISO strings to preserve their time-zone offsets. It is a database snapshot export, not the original uploaded Excel file.
 
-Key backend routes:
+## Historical charts
 
-- `GET /health`
-- `GET /db-check`
+Select **Charts & comparison** from the header. Configure metric, grouping, reference date, and optional snapshot comparison. The endpoint and calculation rules are documented in [docs/CHARTS.md](docs/CHARTS.md).
+
+Charts use `generator_daily_history` for both trend deltas and raw snapshot totals. `generator_d0` is not included in the trend calculation. `region_historical_baseline` supplies missing period/region cells. Alongside the main trend, the charts view shows a regional summary for the latest displayed period: `num_starts` VAR, `running_hours` VAR, and the per-region running-hours accumulation. It also lists up to ten sites whose operational running-hours VAR exceeds 10. Baseline data is regional only, so it does not create site-level entries. Chart PNG export is available for both charts; the trend chart also has a copy-image action, which requires browser clipboard support and a secure context such as HTTPS or localhost.
+
+## API routes
+
+Active source-backed routes:
+
+- `GET /health`, `GET /db-check`
 - `GET /sites`
-- `POST /sites`
-- `GET /generators`
+- `GET /generators`, `GET /sites/{site_id}/generators`
+- `GET /history-captures`
+- `GET /history-captures/{snapshot_date}/download`
 - `GET /analytics/generator-trends`
+
+Legacy upload routes remain available in the backend:
+
 - `POST /upload-excel`
 - `GET /uploads`
-- `GET /uploads/{id}/download` — returns the original for new uploads, or a reconstructed `.xlsx` workbook from saved raw rows for older uploads
+- `GET /uploads/{id}/download`
 - `DELETE /uploads/{id}`
 
-Analytics query parameters:
+These legacy routes operate on upload/ORM tables and do not populate the active capture tables.
 
-- `metric`: `running_hours` or `num_starts`
-- `granularity`: `month` or `week`
-- `reference_date`: optional `YYYY-MM-DD`; defaults to the latest snapshot
-- `comparison_period`: `none`, `DoD`, `WoW`, `6DayBack`, or `MoM`
+## Stack and project files
 
-## Frontend
+- FastAPI, SQLAlchemy, PostgreSQL, pandas, and openpyxl
+- Static frontend: `public/index.html`
+- Routes and analytics: `app/main.py`
+- ORM models (including legacy upload tables): `app/models.py`
+- Database configuration: `app/database.py` and `app/config.py`
+- Chart implementation guide: `docs/CHARTS.md`
+- Docker configuration: `Dockerfile` and `docker-compose.yml`
 
-The app serves the dashboard at `/` and includes:
+Chart.js and its DataLabels plugin load from jsDelivr, so browsers need access to that CDN for charts.
 
-- search by site, IP, REG, and alarm text
-- site and REG filters
-- variance mode selection
-- selected metric controls
-- date-based snapshot filters
-- dynamic column visibility management
-- historical monthly and weekly charts by region, with totals, accumulated values, baseline fallback, snapshot comparison, and PNG export
-- compact grid presentation for operational review
+## Local development
 
-Open the charts view from the header shortcut. The backend aggregates chart data with pandas; the frontend renders it with Chart.js from a CDN. See [docs/CHARTS.md](docs/CHARTS.md) for the data rules and implementation details.
-
-## Project structure
-
-- `app/main.py` — FastAPI app, routes, upload flow, data logic
-- `app/models.py` — SQLAlchemy model definitions
-- `app/database.py` — DB engine and session configuration
-- `app/config.py` — environment settings
-- `app/mapping.py` — header/value normalization rules
-- `public/index.html` — dashboard UI and client-side filtering/rendering
-- `docs/CHARTS.md` — charts feature design, API contract, calculations, and rendering behavior
-- `docker-compose.yml` — local PostgreSQL container config
-- `Dockerfile` — application container definition
-- `requirements.txt` — Python dependencies
-- `.env.example` — environment example file
-
-## Local setup
-
-### 1) Create a virtual environment
+From the project directory:
 
 ```powershell
-cd C:\Users\YOFC\Documents\PROJECTS\GE\myapp-ge
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-```
-
-### 2) Install dependencies
-
-```powershell
 pip install -r requirements.txt
-```
-
-### 3) Configure environment
-
-```powershell
 copy .env.example .env
 ```
 
-Default local configuration:
-
-```env
-DATABASE_URL=postgresql+psycopg://myappge:myappge123@localhost:5432/myappge
-APP_NAME=myapp-ge
-APP_ENV=development
-```
-
-### 4) Start PostgreSQL
+Configure `DATABASE_URL` in `.env` to point to the PostgreSQL database containing the required source tables and the local `sites` and baseline tables. To use the included development database instead:
 
 ```powershell
 docker compose up -d db
-```
-
-### 5) Run the API locally
-
-```powershell
 uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
 ```
 
-Then open:
+Open <http://localhost:8001>. The application startup creates/migrates its SQLAlchemy ORM tables, but it does not create or migrate the external `generator_d0` and `generator_daily_history` source tables. Verify those tables, required columns, keys, and grants in the configured database before starting the application.
 
-- http://localhost:8001
-
-## Notes
-
-- The application is currently tuned for the operational workflow described by the project: manual site maintenance + import-driven generator data + snapshot comparison.
-- Date handling and comparison logic must remain anchored to the imported snapshot date rather than any browser or upload clock.
-- The dashboard is intentionally kept compact for operational monitoring, not for deep analytics reporting.
-
-## Useful commands
-
-### Check the app health
+Useful local checks:
 
 ```bash
 curl http://localhost:8001/health
-```
-
-### Check DB connectivity
-
-```bash
 curl http://localhost:8001/db-check
-```
-
-### List generators
-
-```bash
 curl http://localhost:8001/generators
+curl http://localhost:8001/history-captures
 ```
-
-## Local workflow for real use
-
-1. Start PostgreSQL.
-2. Start the FastAPI app.
-3. Load the master `sites` table manually once.
-4. Upload the Excel/CSV file with generator data.
-5. Confirm the file is stored in the upload history.
-6. Verify that the generator rows match the existing site master data.
-7. Use the dashboard to inspect, filter, and review the imported records.
-
-## Current status
-
-This project is now in the operational dashboard phase.
-
-Completed:
-- FastAPI backend and API routes
-- PostgreSQL schema for sites, generators, uploads, and raw data
-- master sites + generator import logic
-- Excel/CSV normalization and parsing
-- upload history tracking
-- dashboard UI with filters and column selection
-
-Current working principle:
-- `sites` is controlled manually
-- uploaded files populate `generators` after matching by `router_ip`
-- raw upload history is preserved for traceability without contaminating the master site list
-
-## Notes
-
-The app is designed to be practical and operational, not just a raw ingestion demo. The current logic intentionally avoids creating new site records from uploaded files; instead, the upload is matched against the official `sites` table, which keeps the data clean and consistent.
