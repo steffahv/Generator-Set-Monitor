@@ -692,7 +692,13 @@ def generator_trends(
             regional_accumulated[region] = grouped[region].groupby(week_reporting_months).cumsum()
 
     total_series = grouped.sum(axis=1)
-    visible_periods = grouped.index[-12:]
+    # Limit the displayed window after calculating running totals on the full
+    # timeline, so earlier history still contributes to the accumulated series.
+    if granularity == "week":
+        visible_periods = grouped.index[-4:]
+    else:
+        monthly_chart_start = pd.Timestamp("2026-05-01")
+        visible_periods = grouped.index[grouped.index >= monthly_chart_start][-12:]
     latest_visible_period = visible_periods[-1] if len(visible_periods) else None
     site_values = []
     if latest_visible_period is not None:

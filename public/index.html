@@ -408,13 +408,19 @@
       }
 
       .analytics-summary table {
+        display: inline-table;
+        width: auto;
+        max-width: 100%;
         min-width: 0;
+        table-layout: auto;
+        vertical-align: top;
       }
 
       .analytics-summary th,
       .analytics-summary td {
-        padding: 9px 8px;
-        font-size: 12px;
+        padding: 6px 6px;
+        font-size: 11px;
+        white-space: nowrap;
       }
 
       .analytics-summary tfoot td {
@@ -472,7 +478,13 @@
 
       .chart-container {
         position: relative;
-        height: 380px;
+        height: 440px;
+      }
+
+      .trend-chart-container {
+        max-width: 1080px;
+        margin-right: auto;
+        margin-left: auto;
       }
 
       .chart-pinned-tooltip {
@@ -701,6 +713,12 @@
             <article class="chart-card">
               <div class="chart-card-header">
                 <h3>DG Running</h3>
+                <div class="chart-actions">
+                  <span id="regionSummaryCopyStatus" class="muted" aria-live="polite"></span>
+                  <button id="copyRegionSummary" class="chart-download chart-copy secondary" type="button" aria-label="Copy DG Running table" title="Copy table">
+                    <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="3" width="13" height="16" rx="2"></rect><path d="M16 21H5a2 2 0 0 1-2-2V8"></path></svg>
+                  </button>
+                </div>
               </div>
               <p id="analyticsSummaryPeriod" class="muted summary-period-label"></p>
               <div id="analyticsRegionSummary"></div>
@@ -708,6 +726,12 @@
             <article class="chart-card">
               <div class="chart-card-header">
                 <h3 id="topSitesTitle">Sites with Running H VAR &gt; 10</h3>
+                <div class="chart-actions">
+                  <span id="topSitesCopyStatus" class="muted" aria-live="polite"></span>
+                  <button id="copyTopSites" class="chart-download chart-copy secondary" type="button" aria-label="Copy top sites table" title="Copy table">
+                    <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="3" width="13" height="16" rx="2"></rect><path d="M16 21H5a2 2 0 0 1-2-2V8"></path></svg>
+                  </button>
+                </div>
               </div>
               <div id="analyticsTopSites"></div>
             </article>
@@ -724,7 +748,7 @@
                   <button id="downloadTrendChart" class="chart-download secondary" type="button">Download PNG</button>
                 </div>
               </div>
-              <div class="chart-container">
+              <div class="chart-container trend-chart-container">
                 <canvas id="trendChart"></canvas>
                 <div id="trendChartPinnedTooltip" class="chart-pinned-tooltip" aria-live="polite"></div>
               </div>
@@ -797,36 +821,87 @@
         if (typeof ChartDataLabels !== 'undefined') {
           Chart.register(ChartDataLabels);
         }
+        const includeAccumulated = data.granularity !== 'week';
+        const rawValues = [
+          ...data.sites.flatMap((site) => site.values),
+          ...data.total,
+          ...(includeAccumulated ? data.accumulated : []),
+        ].map(Number).filter(Number.isFinite);
+        const dataMax = Math.max(0, ...rawValues);
+        const rawScaleMax = dataMax > 1000
+          ? Math.ceil(dataMax / 1000) * 1000
+          : Math.max(100, Math.ceil(dataMax / 100) * 100);
+        const hasBrokenScale = rawScaleMax > 1000;
+        const chartScaleMax = hasBrokenScale ? 1000 : rawScaleMax;
+        const expandedRangeShare = 0.8;
+        const expandedRangeEnd = chartScaleMax * expandedRangeShare;
+        const transformY = (value) => {
+          const number = Number(value);
+          if (!Number.isFinite(number) || !hasBrokenScale) return number;
+          if (number <= chartScaleMax) return number * expandedRangeShare;
+          return expandedRangeEnd + ((number - chartScaleMax) / (rawScaleMax - chartScaleMax)) * (chartScaleMax - expandedRangeEnd);
+        };
+        const inverseY = (value) => {
+          const number = Number(value);
+          if (!hasBrokenScale) return number;
+          if (number <= expandedRangeEnd) return number / expandedRangeShare;
+          return chartScaleMax + ((number - expandedRangeEnd) / (chartScaleMax - expandedRangeEnd)) * (rawScaleMax - chartScaleMax);
+        };
+        const scaleBreakPlugin = {
+          id: 'trendScaleBreak',
+          afterDraw(chart) {
+            if (!hasBrokenScale) return;
+            const scale = chart.scales.y;
+            const y = scale.getPixelForValue(expandedRangeEnd);
+            const x = scale.left;
+            const context = chart.ctx;
+            context.save();
+            context.strokeStyle = '#64748b';
+            context.lineWidth = 1.5;
+            context.beginPath();
+            context.moveTo(x - 4, y - 4);
+            context.lineTo(x + 4, y);
+            context.moveTo(x - 4, y + 2);
+            context.lineTo(x + 4, y + 6);
+            context.stroke();
+            context.restore();
+          },
+        };
         const palette = ['#f97316', '#0ea5e9', '#65a30d', '#a34116', '#0369a1', '#16a34a', '#7c3aed', '#db2777'];
         const datasets = data.sites.map((site, index) => ({
           label: site.name,
-          data: site.values,
+          data: site.values.map(transformY),
+          rawValues: site.values,
           borderColor: palette[index % palette.length],
           backgroundColor: palette[index % palette.length],
           tension: 0.32,
-          pointRadius: 3,
+          pointRadius: 4,
           borderWidth: 2,
         }));
         datasets.push({
           label: data.metric === 'running_hours' ? 'GE Total hours' : 'GE Total starts',
-          data: data.total,
+          data: data.total.map(transformY),
+          rawValues: data.total,
           borderColor: '#0369a1',
           backgroundColor: '#0369a1',
           tension: 0.32,
-          pointRadius: 3,
+          pointRadius: 4,
           borderWidth: 3,
         });
-        datasets.push({
-          label: 'Accumulated',
-          data: data.accumulated,
-          borderColor: '#166534',
-          backgroundColor: '#166534',
-          tension: 0.32,
-          pointRadius: 3,
-          borderWidth: 3,
-          yAxisID: 'yAccumulated',
-          borderDash: [6, 4],
-        });
+        if (includeAccumulated) {
+          datasets.push({
+            label: 'Accumulated',
+            data: data.accumulated.map(transformY),
+            rawValues: data.accumulated,
+            borderColor: '#166534',
+            backgroundColor: '#166534',
+            tension: 0.32,
+            pointRadius: 3,
+            borderWidth: 3,
+            yAxisID: 'y',
+            borderDash: [6, 4],
+          });
+        }
 
         const pinnedTooltip = document.getElementById('trendChartPinnedTooltip');
         let pinnedDataIndex = null;
@@ -838,7 +913,7 @@
           period.textContent = chart.data.labels[index];
           pinnedTooltip.appendChild(period);
           chart.data.datasets.forEach((dataset) => {
-            const value = dataset.data[index];
+            const value = dataset.rawValues?.[index] ?? dataset.data[index];
             if (value === null || value === undefined) return;
             const item = document.createElement('span');
             item.className = 'chart-pinned-item';
@@ -853,19 +928,21 @@
         if (trendChartInstance) trendChartInstance.destroy();
         trendChartInstance = new Chart(document.getElementById('trendChart'), {
           type: 'line',
+          plugins: hasBrokenScale ? [scaleBreakPlugin] : [],
           data: { labels: data.labels, datasets },
           options: {
             responsive: true,
             maintainAspectRatio: false,
             interaction: { mode: 'index', intersect: false },
-            layout: { padding: { top: 24, right: 30 } },
+            layout: { padding: { top: 48, left: 12, right: 20 } },
             plugins: {
               legend: {
                 position: 'bottom',
                 labels: { boxWidth: 14, padding: 14, usePointStyle: true },
               },
               datalabels: {
-                display: (context) => Number(context.dataset.data[context.dataIndex]) !== 0 ? 'auto' : false,
+                // Labels show raw values while their positions follow the single broken scale.
+                display: (context) => Number(context.dataset.rawValues?.[context.dataIndex] ?? context.dataset.data[context.dataIndex]) !== 0,
                 align: 'top',
                 anchor: 'end',
                 clamp: true,
@@ -873,13 +950,13 @@
                 color: (context) => context.dataset.borderColor,
                 backgroundColor: 'rgba(255, 255, 255, 0.82)',
                 borderRadius: 3,
-                formatter: (value) => Number(value).toLocaleString('es-PE', {
+                formatter: (value, context) => Number(context.dataset.rawValues?.[context.dataIndex] ?? value).toLocaleString('es-PE', {
                   minimumFractionDigits: 1,
                   maximumFractionDigits: 1,
                 }),
-                font: { size: 10, weight: 'bold' },
-                offset: 3,
-                padding: 2,
+                font: { size: 11, weight: 'bold' },
+                offset: 4,
+                padding: { top: 2, right: 3, bottom: 2, left: 3 },
                 textStrokeColor: '#fff',
                 textStrokeWidth: 2,
               },
@@ -901,18 +978,29 @@
             scales: {
               y: {
                 beginAtZero: true,
-                grace: '8%',
+                max: chartScaleMax,
                 position: 'left',
-                title: { display: true, text: data.metric_label },
+                grid: { drawOnChartArea: true },
+                title: { display: true, text: includeAccumulated ? `${data.metric_label} / Accumulated` : data.metric_label },
+                afterBuildTicks: (scale) => {
+                  if (!hasBrokenScale) return;
+                  const rawTicks = [
+                    ...Array.from({ length: 11 }, (_, index) => index * 100),
+                    ...[2000, 4000, 6000, 8000].filter((tick) => tick < rawScaleMax),
+                    rawScaleMax,
+                  ];
+                  scale.ticks = [...new Set(rawTicks)].map((tick) => ({ value: transformY(tick) }));
+                },
+                ticks: {
+                  font: { size: 11, weight: 'bold' },
+                  callback: (value) => Math.round(inverseY(value)).toLocaleString('en-US'),
+                },
               },
-              yAccumulated: {
-                beginAtZero: true,
-                grace: '10%',
-                position: 'right',
-                grid: { drawOnChartArea: false },
-                title: { display: true, text: 'Accumulated' },
+              x: {
+                offset: true,
+                grid: { display: false },
+                ticks: { font: { size: 12, weight: 'bold' } },
               },
-              x: { grid: { display: false } },
             },
           },
         });
@@ -1166,6 +1254,93 @@
           status.textContent = 'Chart copied.';
         } catch (error) {
           status.textContent = 'Could not copy image; check browser clipboard permission.';
+        }
+      }
+
+      async function tableCardToPngBlob(card, table) {
+        const cardRect = card.getBoundingClientRect();
+        const scale = 2;
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.ceil(cardRect.width * scale);
+        canvas.height = Math.ceil(cardRect.height * scale);
+        const context = canvas.getContext('2d');
+        context.scale(scale, scale);
+        context.fillStyle = getComputedStyle(card).backgroundColor || '#ffffff';
+        context.fillRect(0, 0, cardRect.width, cardRect.height);
+
+        const drawTextElement = (element) => {
+          if (!element) return;
+          const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          context.font = style.font;
+          context.fillStyle = style.color;
+          context.textBaseline = 'middle';
+          context.textAlign = style.textAlign === 'center' ? 'center' : style.textAlign === 'right' ? 'right' : 'left';
+          const x = rect.left - cardRect.left + (context.textAlign === 'left' ? 0 : rect.width / (context.textAlign === 'center' ? 2 : 1));
+          const y = rect.top - cardRect.top + rect.height / 2;
+          context.fillText(element.innerText.trim(), x, y, rect.width);
+        };
+
+        drawTextElement(card.querySelector('.chart-card-header h3'));
+        drawTextElement(card.querySelector('.summary-period-label'));
+        for (const row of table.rows) {
+          for (const cell of row.cells) {
+            const rect = cell.getBoundingClientRect();
+            const style = getComputedStyle(cell);
+            const x = rect.left - cardRect.left;
+            const y = rect.top - cardRect.top;
+            context.fillStyle = style.backgroundColor === 'rgba(0, 0, 0, 0)' ? '#ffffff' : style.backgroundColor;
+            context.fillRect(x, y, rect.width, rect.height);
+            context.save();
+            context.beginPath();
+            context.rect(x + 1, y, Math.max(0, rect.width - 2), rect.height);
+            context.clip();
+            context.font = style.font;
+            context.fillStyle = style.color;
+            context.textBaseline = 'middle';
+            context.textAlign = style.textAlign === 'center' ? 'center' : style.textAlign === 'right' ? 'right' : 'left';
+            const paddingLeft = Number.parseFloat(style.paddingLeft) || 0;
+            const paddingRight = Number.parseFloat(style.paddingRight) || 0;
+            const textX = context.textAlign === 'center'
+              ? x + rect.width / 2
+              : context.textAlign === 'right' ? x + rect.width - paddingRight : x + paddingLeft;
+            context.fillText(cell.innerText.trim().replace(/\s+/g, ' '), textX, y + rect.height / 2, rect.width - paddingLeft - paddingRight);
+            context.restore();
+            const borderColor = style.borderBottomColor || '#dfe5ee';
+            const borderWidth = Number.parseFloat(style.borderBottomWidth) || 0;
+            if (borderWidth > 0) {
+              context.fillStyle = borderColor;
+              context.fillRect(x, y + rect.height - borderWidth, rect.width, borderWidth);
+            }
+          }
+        }
+
+        context.strokeStyle = getComputedStyle(card).borderColor || '#dfe5ee';
+        context.lineWidth = 1;
+        context.strokeRect(0.5, 0.5, cardRect.width - 1, cardRect.height - 1);
+        return await new Promise((resolve, reject) => {
+          canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('Could not create the table PNG.')), 'image/png');
+        });
+      }
+
+      async function copyAnalyticsTable(containerId, statusId) {
+        const status = document.getElementById(statusId);
+        const table = document.querySelector(`#${containerId} table`);
+        if (!table) {
+          status.textContent = 'No table to copy.';
+          return;
+        }
+        if (!navigator.clipboard || !navigator.clipboard.write || typeof ClipboardItem === 'undefined') {
+          status.textContent = 'Copy needs HTTPS or localhost.';
+          return;
+        }
+        try {
+          const card = table.closest('.chart-card');
+          const png = await tableCardToPngBlob(card, table);
+          await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
+          status.textContent = 'Table image copied.';
+        } catch (error) {
+          status.textContent = 'Could not copy table image; check browser clipboard permission.';
         }
       }
 
@@ -2157,6 +2332,8 @@
       document.getElementById('openAnalyticsButton').addEventListener('click', () => showAnalyticsView(true));
       document.getElementById('backToMainButton').addEventListener('click', () => showAnalyticsView(false));
       document.getElementById('refreshAnalyticsButton').addEventListener('click', loadAnalyticsCharts);
+      document.getElementById('copyRegionSummary').addEventListener('click', () => copyAnalyticsTable('analyticsRegionSummary', 'regionSummaryCopyStatus'));
+      document.getElementById('copyTopSites').addEventListener('click', () => copyAnalyticsTable('analyticsTopSites', 'topSitesCopyStatus'));
       document.getElementById('copyTrendChart').addEventListener('click', () => copyChartImage(trendChartInstance));
       document.getElementById('copyComparisonChart').addEventListener('click', () => copyChartImage(comparisonChartInstance, 'comparisonChartCopyStatus'));
       document.getElementById('downloadTrendChart').addEventListener('click', () => {
