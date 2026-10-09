@@ -3,8 +3,10 @@ import logging
 import math
 import os
 import mimetypes
+from functools import lru_cache
 from pathlib import Path
 from datetime import date, datetime
+from time import perf_counter
 import unicodedata
 from urllib.parse import quote
 from dotenv import load_dotenv
@@ -18,12 +20,16 @@ from sqlalchemy.exc import SQLAlchemyError
 import pandas as pd
 import json
 from io import BytesIO
+from threading import Lock
 
 load_dotenv()
 logger = logging.getLogger("myappge.upload")
 logging.basicConfig(level=logging.INFO)
 
 ANALYTICS_REGIONS = ("San Martin", "Arequipa", "La Libertad", "Ancash")
+ANALYTICS_HISTORY_CACHE_TTL = 60
+_analytics_history_cache = {}
+_analytics_history_cache_lock = Lock()
 REGION_ALIASES = {
     "san martin": {"san martin", "sanmartin", "sm"},
     "arequipa": {"arequipa", "ar"},
@@ -38,6 +44,7 @@ def normalize_analytics_text(value):
     return re.sub(r"\s+", " ", normalized.lower().replace("_", " ").replace("-", " ")).strip()
 
 
+@lru_cache(maxsize=8192)
 def map_region_name(region_value, site_name):
     region_text = normalize_analytics_text(region_value)
     for canonical, aliases in REGION_ALIASES.items():
@@ -57,6 +64,23 @@ def map_region_name(region_value, site_name):
         if tokens.intersection(alias for alias in aliases if len(alias) <= 2):
             return next(name for name in ANALYTICS_REGIONS if normalize_analytics_text(name) == canonical)
     return None
+
+
+def map_region_names(regions, site_names):
+    """Map repeated region/site pairs once instead of once per history row."""
+    pairs = pd.DataFrame({"region": regions, "site_name": site_names}).drop_duplicates()
+    mapped_pairs = {}
+    for region, site_name in pairs.itertuples(index=False, name=None):
+        key = (
+            None if pd.isna(region) else region,
+            None if pd.isna(site_name) else site_name,
+        )
+        mapped_pairs[key] = map_region_name(region, site_name)
+
+    return [
+        mapped_pairs[(None if pd.isna(region) else region, None if pd.isna(site_name) else site_name)]
+        for region, site_name in zip(regions, site_names)
+    ]
 
 
 def normalize_baseline_metric(value):
@@ -110,6 +134,24 @@ def parse_baseline_period(period_type, period_label, reference_year):
         return pd.Timestamp(date.fromisocalendar(year, week, 1))
     except ValueError:
         return None
+
+
+def get_cached_analytics_history(metric, force_refresh=False):
+    if force_refresh:
+        return None
+    now = perf_counter()
+    with _analytics_history_cache_lock:
+        entry = _analytics_history_cache.get(metric)
+        if entry and entry[0] > now:
+            return entry[1]
+        _analytics_history_cache.pop(metric, None)
+    return None
+
+
+def cache_analytics_history(metric, rows):
+    expires_at = perf_counter() + ANALYTICS_HISTORY_CACHE_TTL
+    with _analytics_history_cache_lock:
+        _analytics_history_cache[metric] = (expires_at, rows)
 
 from app.database import Base, engine, get_db
 from app.mapping import normalize_excel_row
@@ -251,6 +293,14 @@ def ensure_database_schema():
     add_missing_column("rectifiers", "snapshot_date", "snapshot_date DATE")
     add_missing_column("rectifiers", "upload_time", "upload_time TIMESTAMPTZ")
 
+    # The chart queries match sites by normalized name. Index that exact
+    # expression so PostgreSQL can resolve the join without scanning sites.
+    with engine.begin() as connection:
+        connection.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_sites_normalized_site_name "
+            "ON public.sites (lower(trim(site_name)))"
+        ))
+
 
 @app.on_event("startup")
 def startup_event():
@@ -313,11 +363,31 @@ def list_sites(db: Session = Depends(get_db)):
     ]
 
 
-def read_generator_snapshot_rows(db: Session, site_id: int | None = None):
-    """Read dashboard snapshots from D0 plus history, keeping the API response shape."""
+def read_generator_snapshot_rows(
+    db: Session,
+    site_id: int | None = None,
+    snapshot_date: date | None = None,
+    comparison_snapshot_date: date | None = None,
+):
+    """Read only the selected dashboard snapshots from D0 plus history."""
     existing_tables = set(inspect(engine).get_table_names(schema="public"))
     if "generator_daily_history" not in existing_tables:
         raise HTTPException(status_code=503, detail="generator_daily_history is not available in myappge.")
+
+    if snapshot_date is None:
+        latest_sql = """
+            SELECT GREATEST(
+                (SELECT MAX(snapshot_date) FROM public.generator_daily_history),
+                (SELECT MAX(snapshot_date) FROM public.generator_d0)
+            ) AS snapshot_date
+        """ if "generator_d0" in existing_tables else """
+            SELECT MAX(snapshot_date) AS snapshot_date
+            FROM public.generator_daily_history
+        """
+        snapshot_date = db.execute(text(latest_sql)).scalar()
+
+    if snapshot_date is None:
+        return []
 
     if "generator_d0" in existing_tables:
         source_rows = """
@@ -329,6 +399,7 @@ def read_generator_snapshot_rows(db: Session, site_id: int | None = None):
                 h.alarms, 1 AS source_priority
             FROM public.generator_daily_history AS h
             WHERE h.device_type = 'generator'
+              AND (h.snapshot_date = :snapshot_date OR h.snapshot_date = :comparison_snapshot_date)
             UNION ALL
             SELECT
                 d.snapshot_date, d.captured_at, d.site_id, d.device_type, d.device_index,
@@ -338,6 +409,7 @@ def read_generator_snapshot_rows(db: Session, site_id: int | None = None):
                 d.alarms, 0 AS source_priority
             FROM public.generator_d0 AS d
             WHERE d.device_type = 'generator'
+              AND (d.snapshot_date = :snapshot_date OR d.snapshot_date = :comparison_snapshot_date)
         """
     else:
         source_rows = """
@@ -349,6 +421,7 @@ def read_generator_snapshot_rows(db: Session, site_id: int | None = None):
                 h.alarms, 1 AS source_priority
             FROM public.generator_daily_history AS h
             WHERE h.device_type = 'generator'
+              AND (h.snapshot_date = :snapshot_date OR h.snapshot_date = :comparison_snapshot_date)
         """
 
     site_filter = "AND canonical_site_id = :site_id" if site_id is not None else ""
@@ -396,7 +469,11 @@ def read_generator_snapshot_rows(db: Session, site_id: int | None = None):
         FROM mapped_rows
         WHERE row_num = 1 {site_filter}
         ORDER BY snapshot_date DESC, site, device_index
-    """), {"site_id": site_id} if site_id is not None else {}).mappings().all()
+    """), {
+        "snapshot_date": snapshot_date,
+        "comparison_snapshot_date": comparison_snapshot_date or snapshot_date,
+        **({"site_id": site_id} if site_id is not None else {}),
+    }).mappings().all()
 
     result = []
     for row in rows:
@@ -409,8 +486,12 @@ def read_generator_snapshot_rows(db: Session, site_id: int | None = None):
 
 
 @app.get("/generators")
-def list_all_generators(db: Session = Depends(get_db)):
-    return read_generator_snapshot_rows(db)
+def list_all_generators(
+    snapshot_date: date | None = None,
+    comparison_snapshot_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    return read_generator_snapshot_rows(db, snapshot_date=snapshot_date, comparison_snapshot_date=comparison_snapshot_date)
 
 
 @app.get("/analytics/generator-trends")
@@ -419,6 +500,7 @@ def generator_trends(
     granularity: str = "month",
     reference_date: date | None = None,
     comparison_period: str = "none",
+    force_refresh: bool = False,
     db: Session = Depends(get_db),
 ):
     metric_labels = {
@@ -432,46 +514,56 @@ def generator_trends(
     if comparison_period not in {"none", "DoD", "WoW", "6DayBack", "MoM"}:
         raise HTTPException(status_code=400, detail="Unsupported comparison period")
 
-    history_records = db.execute(text(f"""
-        WITH ranked_history AS (
-            SELECT
-                h.device_index AS generator_id,
-                COALESCE(s.site_id, h.site_id) AS site_id,
-                COALESCE(h.site_name, s.site_name) AS site_name,
-                COALESCE(NULLIF(h.region, ''), s.region) AS region,
-                h.router_ip,
-                COALESCE(NULLIF(h.region, ''), s.region) AS reg,
-                h.device_ip AS ip,
-                h.device_type,
-                h.device_index,
-                h.snapshot_date,
-                h.{metric} AS metric_value,
-                ROW_NUMBER() OVER (
-                    PARTITION BY
-                        COALESCE(s.site_id, h.site_id),
-                        h.device_type,
-                        h.device_index,
-                        h.snapshot_date
-                    ORDER BY h.captured_at DESC, h.site_id DESC
-                ) AS row_num
-            FROM public.generator_daily_history AS h
-            LEFT JOIN public.sites AS s
-              ON lower(trim(s.site_name)) = lower(trim(h.site_name))
-            WHERE h.device_type = 'generator'
-              AND h.snapshot_date IS NOT NULL
-        )
-        SELECT
-            generator_id, site_id, site_name, region, router_ip, reg, ip,
-            device_type, device_index, snapshot_date, metric_value AS {metric}
-        FROM ranked_history
-        WHERE row_num = 1
-    """)).mappings().all()
-
+    request_started = perf_counter()
+    phase_started = request_started
     columns = [
-        "generator_id", "site_id", "site_name", "region", "router_ip", "reg", "ip",
+        "generator_id", "site_id", "site_name", "region",
         "device_type", "device_index", "snapshot_date", metric,
     ]
-    df = pd.DataFrame(history_records, columns=columns)
+    history_records = get_cached_analytics_history(metric, force_refresh)
+    history_cache_hit = history_records is not None
+    if not history_cache_hit:
+        history_rows = db.execute(text(f"""
+            WITH ranked_history AS (
+                SELECT
+                    h.device_index AS generator_id,
+                    COALESCE(s.site_id, h.site_id) AS site_id,
+                    COALESCE(h.site_name, s.site_name) AS site_name,
+                    COALESCE(NULLIF(h.region, ''), s.region) AS region,
+                    h.device_type,
+                    h.device_index,
+                    h.snapshot_date,
+                    h.{metric} AS metric_value,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY
+                            COALESCE(s.site_id, h.site_id),
+                            h.device_type,
+                            h.device_index,
+                            h.snapshot_date
+                        ORDER BY h.captured_at DESC, h.site_id DESC
+                    ) AS row_num
+                FROM public.generator_daily_history AS h
+                LEFT JOIN public.sites AS s
+                  ON lower(trim(s.site_name)) = lower(trim(h.site_name))
+                WHERE h.device_type = 'generator'
+                  AND h.snapshot_date IS NOT NULL
+            )
+            SELECT
+                generator_id, site_id, site_name, region,
+                device_type, device_index, snapshot_date, metric_value AS {metric}
+            FROM ranked_history
+            WHERE row_num = 1
+        """)).mappings().all()
+        history_records = [tuple(row[column] for column in columns) for row in history_rows]
+        cache_analytics_history(metric, history_records)
+    history_read_ms = (perf_counter() - phase_started) * 1000
+    logger.info(
+        "generator_trends phase=history_read metric=%s granularity=%s rows=%s cache_hit=%s elapsed_ms=%.1f",
+        metric, granularity, len(history_records), history_cache_hit, history_read_ms,
+    )
+
+    phase_started = perf_counter()
+    df = pd.DataFrame.from_records(history_records, columns=columns)
 
     if not df.empty:
         df["snapshot_date"] = pd.to_datetime(df["snapshot_date"], errors="coerce")
@@ -481,12 +573,17 @@ def generator_trends(
         df["device_key"] = df[identity_columns].fillna("").astype(str).agg("|".join, axis=1)
         df = df.sort_values(["snapshot_date", "generator_id"])
         df = df.drop_duplicates(subset=[*identity_columns, "snapshot_date"], keep="last")
-        df["region_name"] = df.apply(lambda row: map_region_name(row["region"], row["site_name"]), axis=1)
+        df["region_name"] = map_region_names(df["region"], df["site_name"])
         unmapped_sites = sorted(df.loc[df["region_name"].isna(), "site_name"].dropna().astype(str).unique())
         if unmapped_sites:
             logger.warning("Analytics skipped sites without a recognized region: %s", unmapped_sites)
         df = df.dropna(subset=["region_name"])
+    logger.info(
+        "generator_trends phase=history_transform metric=%s rows=%s elapsed_ms=%.1f",
+        metric, len(df), (perf_counter() - phase_started) * 1000,
+    )
 
+    phase_started = perf_counter()
     try:
         baseline_rows = db.execute(text(
             "SELECT period_type, period_label, region_name, metric_name, delta_value "
@@ -499,6 +596,10 @@ def generator_trends(
             status_code=503,
             detail="Could not read region_historical_baseline; verify that the table and required columns exist.",
         ) from exc
+    logger.info(
+        "generator_trends phase=baseline_read metric=%s rows=%s elapsed_ms=%.1f",
+        metric, len(baseline_rows), (perf_counter() - phase_started) * 1000,
+    )
 
     latest_operational_date = df["snapshot_date"].max() if not df.empty else None
     reference_year = (
@@ -608,12 +709,21 @@ def generator_trends(
                 END AS period_value
             FROM deltas
         """)
+        phase_started = perf_counter()
         live_rows = db.execute(
             live_period_query,
             {"reference_date": effective_reference.date()},
         ).mappings().all()
-        for row in live_rows:
-            region_name = map_region_name(row["region"], row["site_name"])
+        logger.info(
+            "generator_trends phase=live_read metric=%s rows=%s elapsed_ms=%.1f",
+            metric, len(live_rows), (perf_counter() - phase_started) * 1000,
+        )
+        phase_started = perf_counter()
+        live_region_names = map_region_names(
+            [row["region"] for row in live_rows],
+            [row["site_name"] for row in live_rows],
+        )
+        for row, region_name in zip(live_rows, live_region_names):
             if region_name not in ANALYTICS_REGIONS:
                 continue
             key = (pd.Timestamp(row["period_start"]), region_name)
@@ -625,6 +735,10 @@ def generator_trends(
                 region_name,
             )
             live_weekly_site_values[site_key] = live_weekly_site_values.get(site_key, 0.0) + float(row["period_value"] or 0)
+        logger.info(
+            "generator_trends phase=live_transform metric=%s elapsed_ms=%.1f",
+            metric, (perf_counter() - phase_started) * 1000,
+        )
 
     def reporting_month_for_week(week_start):
         # A week belongs to the month of its Sunday. For the in-progress week,
@@ -752,7 +866,7 @@ def generator_trends(
             "previous": [round(float(previous_values.get(region, 0)), 2) for region in ANALYTICS_REGIONS],
         }
 
-    return {
+    response = {
         "metric": metric,
         "metric_label": metric_labels[metric],
         "granularity": granularity,
@@ -782,11 +896,26 @@ def generator_trends(
             for period in visible_periods
         ],
     }
+    logger.info(
+        "generator_trends phase=complete metric=%s granularity=%s total_ms=%.1f",
+        metric, granularity, (perf_counter() - request_started) * 1000,
+    )
+    return response
 
 
 @app.get("/sites/{site_id}/generators")
-def list_generators(site_id: int, db: Session = Depends(get_db)):
-    return read_generator_snapshot_rows(db, site_id=site_id)
+def list_generators(
+    site_id: int,
+    snapshot_date: date | None = None,
+    comparison_snapshot_date: date | None = None,
+    db: Session = Depends(get_db),
+):
+    return read_generator_snapshot_rows(
+        db,
+        site_id=site_id,
+        snapshot_date=snapshot_date,
+        comparison_snapshot_date=comparison_snapshot_date,
+    )
 
 
 @app.get("/sites/{site_id}/rectifiers")

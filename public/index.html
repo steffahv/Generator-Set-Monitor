@@ -416,6 +416,27 @@
         vertical-align: top;
       }
 
+      .analytics-summary .region-summary-table {
+        display: table;
+        width: 480px;
+        max-width: 100%;
+        table-layout: fixed;
+      }
+
+      .region-summary-table th:nth-child(1),
+      .region-summary-table td:nth-child(1) { width: 75px; }
+      .region-summary-table th:nth-child(2),
+      .region-summary-table td:nth-child(2) { width: 155px; }
+      .region-summary-table th:nth-child(3),
+      .region-summary-table td:nth-child(3) { width: 120px; }
+      .region-summary-table th:nth-child(4),
+      .region-summary-table td:nth-child(4) { width: 130px; }
+
+      .region-summary-table thead th:nth-child(2) {
+        white-space: normal;
+        line-height: 1.15;
+      }
+
       .analytics-summary th,
       .analytics-summary td {
         padding: 6px 6px;
@@ -1098,7 +1119,8 @@
         };
 
         const summaryTable = document.createElement('table');
-        summaryTable.innerHTML = '<thead><tr><th>Region</th><th>Genset turned on (Num Starts)</th><th>Running Hours</th><th>Accumulated</th></tr></thead>';
+        summaryTable.className = 'region-summary-table';
+        summaryTable.innerHTML = '<thead><tr><th>Region</th><th>Genset turned on<br>(Num Starts)</th><th>Running Hours</th><th>Accumulated</th></tr></thead>';
         const summaryBody = document.createElement('tbody');
         summaryRows.forEach((row) => {
           const tr = document.createElement('tr');
@@ -1160,7 +1182,7 @@
         document.getElementById('topSitesTitle').textContent = `Sites with Running H VAR > 10 (Top ${topSites.length})`;
       }
 
-      async function loadAnalyticsCharts() {
+      async function loadAnalyticsCharts(forceRefresh = false) {
         if (typeof Chart === 'undefined') {
           analyticsStatus.textContent = 'Chart.js could not be loaded. Check the network connection and try again.';
           return;
@@ -1172,6 +1194,9 @@
           granularity: analyticsGranularity.value,
           comparison_period: analyticsComparison.value,
         });
+        if (forceRefresh === true) {
+          params.set('force_refresh', 'true');
+        }
         if (analyticsReferenceDate.value) {
           params.set('reference_date', analyticsReferenceDate.value);
         }
@@ -2269,11 +2294,21 @@
         const targetSiteId = siteId || '';
 
         try {
-          if (!targetSiteId) {
-            allGenerators = await fetchJson(`${API_BASE}/generators`);
-          } else {
-            allGenerators = await fetchJson(`${API_BASE}/sites/${targetSiteId}/generators`);
-          }
+          const requestedSnapshotDate = snapshotDateFilter.value;
+          const comparisonPeriod = comparisonPeriodSelect.value;
+          const comparisonSnapshotDate = requestedSnapshotDate && comparisonPeriod !== 'none'
+            ? formatDateKey(getPreviousSnapshotDate(parseDateValue(requestedSnapshotDate), comparisonPeriod))
+            : '';
+          const query = new URLSearchParams();
+          if (requestedSnapshotDate) query.set('snapshot_date', requestedSnapshotDate);
+          if (comparisonSnapshotDate) query.set('comparison_snapshot_date', comparisonSnapshotDate);
+          const queryString = query.toString();
+          const endpoint = targetSiteId
+            ? `${API_BASE}/sites/${targetSiteId}/generators`
+            : `${API_BASE}/generators`;
+          const url = queryString ? `${endpoint}?${queryString}` : endpoint;
+
+          allGenerators = await fetchJson(url);
 
           const latestSnapshotDate = getLatestSnapshotDate(allGenerators);
           if (!snapshotDateFilter.value && latestSnapshotDate) {
@@ -2308,7 +2343,7 @@
       regFilter.addEventListener('change', renderGeneratorTable);
       generatorSearch.addEventListener('input', renderGeneratorTable);
       comparisonPeriodSelect.addEventListener('change', () => {
-        renderGeneratorTable();
+        loadGenerators(siteSelect.value || '');
       });
       comparisonMetricSelect.addEventListener('change', () => {
         const selectedMetrics = Array.from(comparisonMetricSelect.selectedOptions).map((option) => option.value);
@@ -2319,7 +2354,7 @@
       });
       updateDateFilter.addEventListener('change', renderGeneratorTable);
       uploadDateFilter.addEventListener('change', renderGeneratorTable);
-      snapshotDateFilter.addEventListener('change', renderGeneratorTable);
+      snapshotDateFilter.addEventListener('change', () => loadGenerators(siteSelect.value || ''));
       captureHistoryFilter.addEventListener('change', () => {
         captureHistoryExpanded = false;
         loadHistoryCaptures();
@@ -2331,7 +2366,7 @@
 
       document.getElementById('openAnalyticsButton').addEventListener('click', () => showAnalyticsView(true));
       document.getElementById('backToMainButton').addEventListener('click', () => showAnalyticsView(false));
-      document.getElementById('refreshAnalyticsButton').addEventListener('click', loadAnalyticsCharts);
+      document.getElementById('refreshAnalyticsButton').addEventListener('click', () => loadAnalyticsCharts(true));
       document.getElementById('copyRegionSummary').addEventListener('click', () => copyAnalyticsTable('analyticsRegionSummary', 'regionSummaryCopyStatus'));
       document.getElementById('copyTopSites').addEventListener('click', () => copyAnalyticsTable('analyticsTopSites', 'topSitesCopyStatus'));
       document.getElementById('copyTrendChart').addEventListener('click', () => copyChartImage(trendChartInstance));
