@@ -369,18 +369,13 @@ def read_generator_snapshot_rows(
     snapshot_date: date | None = None,
     comparison_snapshot_date: date | None = None,
 ):
-    """Read only the selected dashboard snapshots from D0 plus history."""
+    """Read selected dashboard snapshots from generator history only."""
     existing_tables = set(inspect(engine).get_table_names(schema="public"))
     if "generator_daily_history" not in existing_tables:
         raise HTTPException(status_code=503, detail="generator_daily_history is not available in myappge.")
 
     if snapshot_date is None:
         latest_sql = """
-            SELECT GREATEST(
-                (SELECT MAX(snapshot_date) FROM public.generator_daily_history),
-                (SELECT MAX(snapshot_date) FROM public.generator_d0)
-            ) AS snapshot_date
-        """ if "generator_d0" in existing_tables else """
             SELECT MAX(snapshot_date) AS snapshot_date
             FROM public.generator_daily_history
         """
@@ -389,40 +384,17 @@ def read_generator_snapshot_rows(
     if snapshot_date is None:
         return []
 
-    if "generator_d0" in existing_tables:
-        source_rows = """
-            SELECT
-                h.snapshot_date, h.captured_at, h.site_id, h.device_type, h.device_index,
-                h.site_name, h.router_ip, h.site_type, h.region, h.device_ip, h.updated_at,
-                h.fuel_level, h.mains_voltage_l1n, h.load_current_l1, h.engine_state,
-                h.controller_mode, h.running_hours, h.total_fuel_consumption, h.num_starts,
-                h.alarms, 1 AS source_priority
-            FROM public.generator_daily_history AS h
-            WHERE h.device_type = 'generator'
-              AND (h.snapshot_date = :snapshot_date OR h.snapshot_date = :comparison_snapshot_date)
-            UNION ALL
-            SELECT
-                d.snapshot_date, d.captured_at, d.site_id, d.device_type, d.device_index,
-                d.site_name, d.router_ip, d.site_type, d.region, d.device_ip, d.updated_at,
-                d.fuel_level, d.mains_voltage_l1n, d.load_current_l1, d.engine_state,
-                d.controller_mode, d.running_hours, d.total_fuel_consumption, d.num_starts,
-                d.alarms, 0 AS source_priority
-            FROM public.generator_d0 AS d
-            WHERE d.device_type = 'generator'
-              AND (d.snapshot_date = :snapshot_date OR d.snapshot_date = :comparison_snapshot_date)
-        """
-    else:
-        source_rows = """
-            SELECT
-                h.snapshot_date, h.captured_at, h.site_id, h.device_type, h.device_index,
-                h.site_name, h.router_ip, h.site_type, h.region, h.device_ip, h.updated_at,
-                h.fuel_level, h.mains_voltage_l1n, h.load_current_l1, h.engine_state,
-                h.controller_mode, h.running_hours, h.total_fuel_consumption, h.num_starts,
-                h.alarms, 1 AS source_priority
-            FROM public.generator_daily_history AS h
-            WHERE h.device_type = 'generator'
-              AND (h.snapshot_date = :snapshot_date OR h.snapshot_date = :comparison_snapshot_date)
-        """
+    source_rows = """
+        SELECT
+            h.snapshot_date, h.captured_at, h.site_id, h.device_type, h.device_index,
+            h.site_name, h.router_ip, h.site_type, h.region, h.device_ip, h.updated_at,
+            h.fuel_level, h.mains_voltage_l1n, h.load_current_l1, h.engine_state,
+            h.controller_mode, h.running_hours, h.total_fuel_consumption, h.num_starts,
+            h.alarms
+        FROM public.generator_daily_history AS h
+        WHERE h.device_type = 'generator'
+          AND (h.snapshot_date = :snapshot_date OR h.snapshot_date = :comparison_snapshot_date)
+    """
 
     site_filter = "AND canonical_site_id = :site_id" if site_id is not None else ""
     rows = db.execute(text(f"""
@@ -438,7 +410,7 @@ def read_generator_snapshot_rows(
                         source_rows.device_type,
                         source_rows.device_index,
                         source_rows.snapshot_date
-                    ORDER BY source_rows.source_priority, source_rows.captured_at DESC
+                    ORDER BY source_rows.captured_at DESC
                 ) AS row_num
             FROM source_rows
             LEFT JOIN public.sites AS s

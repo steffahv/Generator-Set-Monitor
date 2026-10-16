@@ -47,7 +47,7 @@ Unsupported values return HTTP 400. Missing `region_historical_baseline` or requ
 
 Response fields:
 
-- `labels`: up to the latest 12 month or ISO-week labels through the effective reference date.
+- `labels`: monthly view includes periods from May 2026 (up to 12); weekly view includes only the latest four ISO weeks through the effective reference date.
 - `sites`: four `{name, values}` regional series (the `sites` key is retained for frontend compatibility): `San Martin`, `Arequipa`, `La Libertad`, and `Ancash`.
 - `total`: horizontal sum of the four regional period values.
 - `accumulated`: monthly cumulative total or weekly total accumulated within each reporting month.
@@ -125,6 +125,8 @@ Operational and baseline values are not added together for one cell. This is a c
 
 Accumulation is calculated before the chart is sliced to its latest 12 labels.
 
+For the weekly view, the visible chart is sliced to four weeks only after deltas and running totals have been calculated across the full timeline. Monthly is similarly limited to the supported window beginning May 2026. This keeps accumulated values consistent with earlier periods that are not currently visible.
+
 ## Snapshot comparison and missing coverage
 
 Snapshot comparison uses raw counter totals; it is separate from the period-delta calculation:
@@ -138,7 +140,7 @@ The response includes the actual dates selected. Missing devices are not matched
 
 ## Regional summary and site list
 
-The charts view makes a second request for the other counter so it can show both metrics regardless of which metric is plotted:
+The charts view makes a second request for the other counter so it can show both metrics regardless of which metric is plotted. The selected metric response draws the line chart and initial summary immediately; the companion response then fills the other metric's summary values and site table. Thus, the graph can appear before the complete summary has finished loading.
 
 - **Genset turned on (Num Starts):** the regional `num_starts` period variance for the latest displayed period.
 - **Running Hours:** the regional `running_hours` period variance for that period.
@@ -160,10 +162,26 @@ Relevant code in `public/index.html`:
 - `downloadChartImage(chart, filename)`: exports a chart as PNG.
 - `copyChartImage(chart)`: copies the trend canvas PNG to the clipboard.
 
+## Performance and request path
+
+The main dashboard table and the charts endpoint do different work, although both ultimately use the same history source. The dashboard normally requests one selected snapshot, about one row per generator (448 rows in the reported environment), and applies its interactive filters to that result. The trend endpoint must read historical readings for all devices so it can deduplicate snapshots, compare each cumulative counter with the preceding available non-null reading, handle counter resets, and aggregate the resulting deltas by week/month, region, and site. It also calculates cumulative series and optional snapshot comparisons. A latest-snapshot table cannot supply those historical deltas by itself.
+
+The trend request currently has two substantial data paths per metric:
+
+1. It reads the deduplicated history into the application to determine periods, comparison data, and chart aggregation.
+2. It runs a separate PostgreSQL query with `LAG` to produce operational weekly deltas and site-level values.
+
+This preserves the established calculation rules, but repeats work over roughly 73,000 history rows in the reported environment. When both metrics are needed, the browser requests them separately; the second request is for the summary and site list. Each database response may be small while query execution and server-side transformation still take several seconds.
+
+The application caches the selected metric's history rows in process memory for 60 seconds. Monthly/weekly changes can reuse that history while the cache is valid, but the live `LAG` query and transformations still run. The cache is local to one application process, is not shared across workers or restarts, and the Refresh charts action bypasses it (`force_refresh=true`). Timing logs under `generator_trends` report `history_read` (including `cache_hit`), `history_transform`, `baseline_read`, `live_read`, `live_transform`, and total request time.
+
+In the latest reported use, chart response time improved from about 12 seconds to 5–6 seconds. The remaining delay is consistent with the historical queries and per-request processing described above; it is not caused by Chart.js drawing the lines. The most direct next optimization is to avoid scanning and transforming the same history twice per metric while keeping the current delta, reset, baseline, and aggregation rules unchanged. Any query/materialized-summary change should be checked against the existing chart values before rollout.
+
 ## Maintenance notes
 
 - Add a selectable metric to both the frontend selector and backend whitelist. Counter metrics can use the existing difference logic; instantaneous metrics require a separate aggregation rule.
 - If source identity, deduplication, or site-name mapping changes, update this document and the dashboard identity rules together.
 - If comparison windows change, update endpoint validation, date offsets, and frontend options together.
 - Keep baseline period labels and names aligned with the parser and canonical regions. Operational values take precedence only for the same period/region cell.
-- The endpoint currently loads the matching history into memory per request. If volume grows substantially, consider database-side aggregation or caching.
+- Preserve the PostgreSQL `LAG` counter-delta behavior, including null handling and resets, when optimizing the endpoint.
+- If changing query shape or adding pre-aggregation, compare monthly/weekly regional values, accumulated series, baselines, site ranking, and snapshot comparisons against the current implementation.

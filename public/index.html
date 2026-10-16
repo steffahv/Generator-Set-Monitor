@@ -634,11 +634,6 @@
           </div>
 
           <div class="field">
-            <label for="uploadDateFilter">Upload time</label>
-            <input id="uploadDateFilter" type="date" />
-          </div>
-
-          <div class="field">
             <label for="snapshotDateFilter">Reference Date</label>
             <input id="snapshotDateFilter" type="date" />
           </div>
@@ -818,7 +813,6 @@
       const generatorSearch = document.getElementById('generatorSearch');
       const regFilter = document.getElementById('regFilter');
       const updateDateFilter = document.getElementById('updateDateFilter');
-      const uploadDateFilter = document.getElementById('uploadDateFilter');
       const snapshotDateFilter = document.getElementById('snapshotDateFilter');
       const captureHistoryFilter = document.getElementById('captureHistoryFilter');
       const comparisonPeriodSelect = document.getElementById('comparisonPeriodSelect');
@@ -1090,6 +1084,8 @@
       function renderAnalyticsSummary(chartData, companionData) {
         const runningData = chartData.metric === 'running_hours' ? chartData : companionData;
         const startsData = chartData.metric === 'num_starts' ? chartData : companionData;
+        const runningAvailable = Boolean(runningData);
+        const startsAvailable = Boolean(startsData);
         const periodLabel = chartData.labels[chartData.labels.length - 1];
         document.getElementById('analyticsSummaryPeriod').textContent = periodLabel
           ? `Latest displayed period: ${periodLabel}. Regional values are period VARs; accumulated is the running total.`
@@ -1124,7 +1120,12 @@
         const summaryBody = document.createElement('tbody');
         summaryRows.forEach((row) => {
           const tr = document.createElement('tr');
-          [row.region, formatValue(row.starts), formatValue(row.running), formatValue(row.accumulated)]
+          [
+            row.region,
+            startsAvailable ? formatValue(row.starts) : '…',
+            runningAvailable ? formatValue(row.running) : '…',
+            runningAvailable ? formatValue(row.accumulated) : '…',
+          ]
             .forEach((value) => {
               const td = document.createElement('td');
               td.textContent = value;
@@ -1135,7 +1136,12 @@
         summaryTable.appendChild(summaryBody);
         const summaryFooter = document.createElement('tfoot');
         const totalRow = document.createElement('tr');
-        ['TOTAL', formatValue(sumValues('starts')), formatValue(sumValues('running')), formatValue(sumValues('accumulated'))]
+        [
+          'TOTAL',
+          startsAvailable ? formatValue(sumValues('starts')) : '…',
+          runningAvailable ? formatValue(sumValues('running')) : '…',
+          runningAvailable ? formatValue(sumValues('accumulated')) : '…',
+        ]
           .forEach((value) => {
             const td = document.createElement('td');
             td.textContent = value;
@@ -1160,15 +1166,20 @@
           const td = document.createElement('td');
           td.colSpan = 4;
           td.className = 'muted';
-          td.textContent = runningData
+          td.textContent = runningAvailable
             ? 'No operational site exceeded 10 running hours in this period.'
-            : 'Site summary is unavailable.';
+            : 'Loading site summary…';
           tr.appendChild(td);
           topBody.appendChild(tr);
         } else {
           topSites.forEach((site) => {
             const tr = document.createElement('tr');
-            [site.region, site.name, formatValue(Number(site.value)), formatValue(startsBySite.get(String(site.site_id)) ?? null)]
+            [
+              site.region,
+              site.name,
+              formatValue(Number(site.value)),
+              startsAvailable ? formatValue(startsBySite.get(String(site.site_id)) ?? null) : '…',
+            ]
               .forEach((value) => {
                 const td = document.createElement('td');
                 td.textContent = value;
@@ -1219,6 +1230,8 @@
           }
 
           renderTrendChart(data);
+          renderAnalyticsSummary(data, null);
+          analyticsStatus.textContent = `Chart loaded. Loading summary data for the other metric…`;
           let companionData = null;
           try {
             const companionParams = new URLSearchParams(params);
@@ -1377,7 +1390,6 @@
         { key: 'running_hours', label: 'Running H' },
         { key: 'num_starts', label: 'Num Starts' },
         { key: 'update_time', label: 'Update time' },
-        { key: 'upload_time', label: 'Upload time' },
         { key: 'snapshot_date', label: 'Snapshot date' },
       ];
 
@@ -1812,13 +1824,24 @@
         return selected.length ? selected : ['running_hours'];
       }
 
+      function getEffectiveTableSort() {
+        if (activeComparisonSort) return activeComparisonSort;
+        const metricKey = comparisonPeriodSelect.value === 'none'
+          ? 'running_hours'
+          : getSelectedComparisonMetrics()[0];
+        return { metricKey, direction: 'desc' };
+      }
+
       function toggleTableSort(metricKey) {
-        if (!activeComparisonSort || activeComparisonSort.metricKey !== metricKey) {
+        const currentSort = getEffectiveTableSort();
+        if (!currentSort || currentSort.metricKey !== metricKey) {
           activeComparisonSort = { metricKey, direction: 'desc' };
-        } else if (activeComparisonSort.direction === 'desc') {
+        } else if (currentSort.direction === 'desc') {
           activeComparisonSort = { metricKey, direction: 'asc' };
         } else {
-          activeComparisonSort = null;
+          activeComparisonSort = comparisonPeriodSelect.value === 'none'
+            ? { metricKey: 'running_hours', direction: 'desc' }
+            : null;
         }
       }
 
@@ -1848,16 +1871,26 @@
           };
         });
 
-        if (activeComparisonSort
-            && (period === 'none' || comparisonMetrics.includes(activeComparisonSort.metricKey))) {
-          const sortDirection = activeComparisonSort.direction === 'asc' ? 1 : -1;
-          const sortMetricKey = activeComparisonSort.metricKey;
+        const effectiveSort = getEffectiveTableSort();
+        if (effectiveSort
+            && (period === 'none' || comparisonMetrics.includes(effectiveSort.metricKey))) {
+          const sortDirection = effectiveSort.direction === 'asc' ? 1 : -1;
+          const sortMetricKey = effectiveSort.metricKey;
           const originalPositions = new Map(rowsWithDelta.map((row, index) => [row, index]));
+          const hasComparableDeltas = period !== 'none' && rowsWithDelta.some((row) => {
+            const value = row[`comparison_delta_${sortMetricKey}`];
+            return value !== null && value !== undefined && Number.isFinite(Number(value));
+          });
           rowsWithDelta.sort((rowA, rowB) => {
             const getSortValue = (row) => {
-              const value = period === 'none'
-                ? row[sortMetricKey]
-                : row[`comparison_delta_${sortMetricKey}`];
+              let value = row[sortMetricKey];
+              if (period !== 'none') {
+                value = row[`comparison_delta_${sortMetricKey}`];
+                if (!hasComparableDeltas) {
+                  value = row[`comparison_current_${sortMetricKey}`]
+                    ?? row[`comparison_previous_${sortMetricKey}`];
+                }
+              }
               return value !== null && value !== undefined && Number.isFinite(Number(value))
                 ? Number(value)
                 : null;
@@ -1942,14 +1975,15 @@
             const label = document.createElement('span');
             label.textContent = column.label || column;
             const sortButton = document.createElement('button');
-            const isActiveSort = activeComparisonSort?.metricKey === sortableMetricKey;
+            const effectiveSort = getEffectiveTableSort();
+            const isActiveSort = effectiveSort?.metricKey === sortableMetricKey;
             sortButton.type = 'button';
             sortButton.className = 'variance-sort-button';
             sortButton.textContent = isActiveSort
-              ? (activeComparisonSort.direction === 'desc' ? '↓' : '↑')
+              ? (effectiveSort.direction === 'desc' ? '↓' : '↑')
               : '↕';
             sortButton.title = isActiveSort
-              ? `${activeComparisonSort.direction.toUpperCase()} by ${getMetricLabel(sortableMetricKey)}${period === 'none' ? '' : ' VAR'}; click to change order`
+              ? `${effectiveSort.direction.toUpperCase()} by ${getMetricLabel(sortableMetricKey)}${period === 'none' ? '' : ' VAR'}; click to change order`
               : `Sort by ${getMetricLabel(sortableMetricKey)}${period === 'none' ? '' : ' VAR'}`;
             sortButton.setAttribute('aria-label', sortButton.title);
             sortButton.setAttribute('aria-pressed', String(Boolean(isActiveSort)));
@@ -2111,7 +2145,6 @@
         const selectedSite = siteSelect.value;
         const selectedReg = regFilter.value;
         const selectedUpdateDate = updateDateFilter.value;
-        const selectedUploadDate = uploadDateFilter.value;
         const selectedSnapshotDate = snapshotDateFilter.value;
         const latestSnapshotDate = getLatestSnapshotDate(allGenerators);
         if (!selectedSnapshotDate && latestSnapshotDate) {
@@ -2133,10 +2166,6 @@
           }
 
           if (selectedUpdateDate && getDateOnlyValue(row.update_time) !== selectedUpdateDate) {
-            return false;
-          }
-
-          if (selectedUploadDate && getDateOnlyValue(row.upload_time) !== selectedUploadDate) {
             return false;
           }
 
@@ -2325,15 +2354,22 @@
         }
       }
 
-      document.getElementById('refreshButton').addEventListener('click', async () => {
+      document.getElementById('refreshButton').addEventListener('click', async (event) => {
+        const button = event.currentTarget;
         const currentSite = siteSelect.value || '';
-        await loadSites();
-        if (currentSite) {
+        const originalLabel = button.textContent;
+        button.disabled = true;
+        button.textContent = 'Refreshing...';
+        tableStatus.textContent = 'Refreshing data and applying selected filters...';
+        try {
+          await loadSites();
           siteSelect.value = currentSite;
-        } else {
-          siteSelect.value = '';
+          await loadGenerators(siteSelect.value || '');
+          renderGeneratorTable();
+        } finally {
+          button.disabled = false;
+          button.textContent = originalLabel;
         }
-        await loadGenerators(siteSelect.value || '');
       });
 
       siteSelect.addEventListener('change', () => {
@@ -2343,6 +2379,7 @@
       regFilter.addEventListener('change', renderGeneratorTable);
       generatorSearch.addEventListener('input', renderGeneratorTable);
       comparisonPeriodSelect.addEventListener('change', () => {
+        activeComparisonSort = null;
         loadGenerators(siteSelect.value || '');
       });
       comparisonMetricSelect.addEventListener('change', () => {
@@ -2353,7 +2390,6 @@
         renderGeneratorTable();
       });
       updateDateFilter.addEventListener('change', renderGeneratorTable);
-      uploadDateFilter.addEventListener('change', renderGeneratorTable);
       snapshotDateFilter.addEventListener('change', () => loadGenerators(siteSelect.value || ''));
       captureHistoryFilter.addEventListener('change', () => {
         captureHistoryExpanded = false;
