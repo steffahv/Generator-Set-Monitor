@@ -614,7 +614,7 @@
             <select id="comparisonPeriodSelect">
               <option value="none">No comparison</option>
               <option value="DoD">DoD</option>
-              <option value="WoW">WoW</option>
+              <option value="WoW" selected>WoW</option>
               <option value="6DayBack">6D Back</option>
               <option value="MoM">MoM</option>
             </select>
@@ -657,6 +657,7 @@
             </div>
           </div>
           <div id="comparisonDates" class="comparison-dates" hidden></div>
+          <button id="downloadComparisonExcel" class="secondary" type="button" style="width:auto;margin-left:auto;" hidden>Download Excel</button>
         </div>
 
         <div class="table-wrap">
@@ -821,6 +822,8 @@
       const columnToggle = document.getElementById('columnToggle');
       const columnToggleCount = document.getElementById('columnToggleCount');
       const comparisonDates = document.getElementById('comparisonDates');
+      const downloadComparisonExcelButton = document.getElementById('downloadComparisonExcel');
+      let comparisonExportData = null;
       const selectAllColumnsButton = document.getElementById('selectAllColumns');
       const clearAllColumnsButton = document.getElementById('clearAllColumns');
       let activeComparisonSort = null;
@@ -1847,6 +1850,7 @@
 
       function renderTable(container, rows, columns) {
         if (!rows || rows.length === 0) {
+          comparisonExportData = null;
           container.innerHTML = '<div class="muted" style="padding:18px;">No data available.</div>';
           return;
         }
@@ -1948,6 +1952,26 @@
           tableColumns.splice(0, tableColumns.length, ...filteredColumns);
           tableColumns.splice(insertionIndex, 0, ...comparisonBlocks);
         }
+
+        const exportHeaders = tableColumns.map((column) => {
+          const key = typeof column === 'string' ? column : column.key;
+          const label = typeof column === 'string' ? column : column.label;
+          if (key.startsWith('comparison_')) {
+            const metricKey = key.replace(/^comparison_(previous|delta|current)_/, '');
+            return `${getMetricLabel(metricKey)} - ${label}`;
+          }
+          return getColumnHeaderLabel(key, label || key);
+        });
+        comparisonExportData = period === 'none' ? null : {
+          headers: exportHeaders,
+          rows: rowsWithDelta.map((row) => tableColumns.map((column) => {
+            const key = typeof column === 'string' ? column : column.key;
+            if (key.startsWith('comparison_current_')) return row[key] ?? null;
+            if (key.startsWith('comparison_delta_')) return row[key] ?? null;
+            if (key.startsWith('comparison_previous_')) return row[key] ?? null;
+            return row[key] ?? null;
+          })),
+        };
 
         const table = document.createElement('table');
         const thead = document.createElement('thead');
@@ -2210,6 +2234,8 @@
           );
 
         if (!displayRows.length) {
+          comparisonExportData = null;
+          downloadComparisonExcelButton.hidden = true;
           mainTableContainer.innerHTML = '<div class="muted" style="padding:18px;">No matching generators found.</div>';
           tableStatus.textContent = 'No matching generators found.';
           return;
@@ -2217,6 +2243,50 @@
 
         tableStatus.textContent = `Showing ${displayRows.length} generator records.`;
         renderTable(mainTableContainer, displayRows, visibleColumns);
+        downloadComparisonExcelButton.hidden = comparisonPeriod === 'none' || !comparisonExportData;
+      }
+
+      async function downloadComparisonExcel() {
+        if (!comparisonExportData || comparisonPeriodSelect.value === 'none') return;
+        const button = downloadComparisonExcelButton;
+        button.disabled = true;
+        const originalLabel = button.textContent;
+        button.textContent = 'Preparing...';
+        try {
+          const activeDate = getActiveSnapshotDate();
+          const previousDate = activeDate ? getPreviousSnapshotDate(activeDate, comparisonPeriodSelect.value) : null;
+          const selectedMetrics = getSelectedComparisonMetrics();
+          const metricName = selectedMetrics.length === 1
+            ? (selectedMetrics[0] === 'running_hours' ? 'running-hours' : 'num-starts')
+            : 'comparison';
+          const periodName = comparisonPeriodSelect.value === 'WoW' && previousDate && activeDate
+            ? `week-${getIsoWeekNumber(previousDate)}-vs-week-${getIsoWeekNumber(activeDate)}`
+            : `${formatDateKey(previousDate) || 'previous'}-vs-${formatDateKey(activeDate) || 'current'}`;
+          const filename = `generator-${metricName}-${periodName}.xlsx`;
+          const response = await fetch(`${API_BASE}/export-comparison`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...comparisonExportData, filename }),
+          });
+          if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.detail || `Export failed (${response.status}).`);
+          }
+          const blob = await response.blob();
+          const objectUrl = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = objectUrl;
+          link.download = filename;
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+          URL.revokeObjectURL(objectUrl);
+        } catch (error) {
+          tableStatus.textContent = `Could not download Excel: ${error.message}`;
+        } finally {
+          button.disabled = false;
+          button.textContent = originalLabel;
+        }
       }
 
       async function loadHistoryCaptures() {
@@ -2323,27 +2393,38 @@
         const targetSiteId = siteId || '';
 
         try {
-          const requestedSnapshotDate = snapshotDateFilter.value;
+          let requestedSnapshotDate = snapshotDateFilter.value;
           const comparisonPeriod = comparisonPeriodSelect.value;
-          const comparisonSnapshotDate = requestedSnapshotDate && comparisonPeriod !== 'none'
-            ? formatDateKey(getPreviousSnapshotDate(parseDateValue(requestedSnapshotDate), comparisonPeriod))
-            : '';
           const query = new URLSearchParams();
           if (requestedSnapshotDate) query.set('snapshot_date', requestedSnapshotDate);
-          if (comparisonSnapshotDate) query.set('comparison_snapshot_date', comparisonSnapshotDate);
+          if (requestedSnapshotDate && comparisonPeriod !== 'none') {
+            const comparisonSnapshotDate = formatDateKey(
+              getPreviousSnapshotDate(parseDateValue(requestedSnapshotDate), comparisonPeriod),
+            );
+            if (comparisonSnapshotDate) query.set('comparison_snapshot_date', comparisonSnapshotDate);
+          }
           const queryString = query.toString();
           const endpoint = targetSiteId
             ? `${API_BASE}/sites/${targetSiteId}/generators`
             : `${API_BASE}/generators`;
           const url = queryString ? `${endpoint}?${queryString}` : endpoint;
 
-          allGenerators = await fetchJson(url);
-
-          const latestSnapshotDate = getLatestSnapshotDate(allGenerators);
+          let generatorRows = await fetchJson(url);
+          const latestSnapshotDate = getLatestSnapshotDate(generatorRows);
           if (!snapshotDateFilter.value && latestSnapshotDate) {
             snapshotDateFilter.value = formatDateKey(latestSnapshotDate);
+            requestedSnapshotDate = snapshotDateFilter.value;
+            if (comparisonPeriod !== 'none') {
+              query.set('snapshot_date', requestedSnapshotDate);
+              const comparisonSnapshotDate = formatDateKey(
+                getPreviousSnapshotDate(parseDateValue(requestedSnapshotDate), comparisonPeriod),
+              );
+              if (comparisonSnapshotDate) query.set('comparison_snapshot_date', comparisonSnapshotDate);
+              generatorRows = await fetchJson(`${endpoint}?${query.toString()}`);
+            }
           }
 
+          allGenerators = generatorRows;
           populateRegFilter(allGenerators);
           renderGeneratorTable();
         } catch (error) {
@@ -2403,6 +2484,7 @@
       document.getElementById('openAnalyticsButton').addEventListener('click', () => showAnalyticsView(true));
       document.getElementById('backToMainButton').addEventListener('click', () => showAnalyticsView(false));
       document.getElementById('refreshAnalyticsButton').addEventListener('click', () => loadAnalyticsCharts(true));
+      downloadComparisonExcelButton.addEventListener('click', downloadComparisonExcel);
       document.getElementById('copyRegionSummary').addEventListener('click', () => copyAnalyticsTable('analyticsRegionSummary', 'regionSummaryCopyStatus'));
       document.getElementById('copyTopSites').addEventListener('click', () => copyAnalyticsTable('analyticsTopSites', 'topSitesCopyStatus'));
       document.getElementById('copyTrendChart').addEventListener('click', () => copyChartImage(trendChartInstance));

@@ -10,7 +10,7 @@ from time import perf_counter
 import unicodedata
 from urllib.parse import quote
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, UploadFile, Depends, HTTPException
+from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -1166,6 +1166,56 @@ def download_history_capture(snapshot_date: date, db: Session = Depends(get_db))
         excel_buffer,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
+
+
+@app.post("/export-comparison")
+def export_comparison(payload: dict = Body(...)):
+    headers = payload.get("headers")
+    rows = payload.get("rows")
+    filename = str(payload.get("filename") or "generator-comparison.xlsx")
+    if not isinstance(headers, list) or not headers or not all(isinstance(item, str) for item in headers):
+        raise HTTPException(status_code=400, detail="Export headers are required.")
+    if not isinstance(rows, list) or len(rows) > 10000:
+        raise HTTPException(status_code=400, detail="Export rows are invalid or exceed the 10,000 row limit.")
+    if any(not isinstance(row, list) or len(row) != len(headers) for row in rows):
+        raise HTTPException(status_code=400, detail="Each export row must match the header count.")
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Comparison"
+    worksheet.append(headers)
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True, color="0F172A")
+        cell.fill = PatternFill("solid", fgColor="DFEAFF")
+        cell.alignment = Alignment(vertical="center")
+
+    for row_values in rows:
+        worksheet.append(row_values)
+        for cell in worksheet[worksheet.max_row]:
+            if isinstance(cell.value, str):
+                cell.data_type = "s"
+
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = worksheet.dimensions
+    for column_cells in worksheet.columns:
+        column_letter = column_cells[0].column_letter
+        max_length = max((len(str(cell.value or "")) for cell in column_cells), default=10)
+        worksheet.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 40)
+
+    excel_buffer = BytesIO()
+    workbook.save(excel_buffer)
+    excel_buffer.seek(0)
+    safe_filename = re.sub(r"[^A-Za-z0-9._-]", "_", filename)
+    if not safe_filename.lower().endswith(".xlsx"):
+        safe_filename += ".xlsx"
+    return StreamingResponse(
+        excel_buffer,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{safe_filename}"'},
     )
 
 
