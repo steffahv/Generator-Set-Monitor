@@ -28,6 +28,18 @@ logging.basicConfig(level=logging.INFO)
 
 ANALYTICS_REGIONS = ("San Martin", "Arequipa", "La Libertad", "Ancash")
 ANALYTICS_HISTORY_CACHE_TTL = 60
+# Preserve published ISO-week values through Week 42. Starting Week 43,
+# weekly points use the same exact-date WoW subtraction as the main table.
+ANALYTICS_WEEKLY_COMPARISON_START = pd.Timestamp("2026-10-19")
+# Week 42 was last published with data through Friday, October 16. Keep that
+# partial-week value stable when later weekend captures are present.
+ANALYTICS_WEEKLY_LEGACY_LAST_SNAPSHOT = pd.Timestamp("2026-10-16")
+# Week 42's published running-hours value differs by 0.3 from a replay of the
+# snapshots currently in the database. Preserve its reported Ancash cell so
+# the regional lines and GE total remain aligned with the published chart.
+ANALYTICS_WEEKLY_PUBLISHED_OVERRIDES = {
+    ("running_hours", pd.Timestamp("2026-10-12"), "Ancash"): 132.5,
+}
 _analytics_history_cache = {}
 _analytics_history_cache_lock = Lock()
 REGION_ALIASES = {
@@ -536,9 +548,14 @@ def generator_trends(
 
     phase_started = perf_counter()
     df = pd.DataFrame.from_records(history_records, columns=columns)
+    history_snapshot_dates = []
 
     if not df.empty:
         df["snapshot_date"] = pd.to_datetime(df["snapshot_date"], errors="coerce")
+        history_snapshot_dates = [
+            pd.Timestamp(value).normalize()
+            for value in df["snapshot_date"].dropna().unique()
+        ]
         df[metric] = pd.to_numeric(df[metric], errors="coerce")
         df = df.dropna(subset=["snapshot_date", metric])
         identity_columns = ["site_id", "device_type", "device_index"]
@@ -670,6 +687,7 @@ def generator_trends(
                 FROM deduplicated_snapshots
             )
             SELECT
+                snapshot_date,
                 date_trunc('{period_unit}', snapshot_date::timestamp)::date AS period_start,
                 site_id,
                 site_name,
@@ -698,19 +716,75 @@ def generator_trends(
         for row, region_name in zip(live_rows, live_region_names):
             if region_name not in ANALYTICS_REGIONS:
                 continue
-            key = (pd.Timestamp(row["period_start"]), region_name)
+            period_start = pd.Timestamp(row["period_start"])
+            snapshot_date = pd.Timestamp(row["snapshot_date"])
+            if (
+                period_start < ANALYTICS_WEEKLY_COMPARISON_START
+                and snapshot_date > ANALYTICS_WEEKLY_LEGACY_LAST_SNAPSHOT
+            ):
+                continue
+            key = (period_start, region_name)
             live_weekly_values[key] = live_weekly_values.get(key, 0.0) + float(row["period_value"] or 0)
             site_key = (
-                pd.Timestamp(row["period_start"]),
+                period_start,
                 row["site_id"],
                 str(row["site_name"] or "Unknown site"),
                 region_name,
             )
             live_weekly_site_values[site_key] = live_weekly_site_values.get(site_key, 0.0) + float(row["period_value"] or 0)
+
+        for (override_metric, override_period, override_region), override_value in ANALYTICS_WEEKLY_PUBLISHED_OVERRIDES.items():
+            if override_metric == metric and effective_reference >= override_period:
+                live_weekly_values[(override_period, override_region)] = override_value
         logger.info(
             "generator_trends phase=live_transform metric=%s elapsed_ms=%.1f",
             metric, (perf_counter() - phase_started) * 1000,
         )
+
+    # Keep previously reported calendar-week values unchanged. From the
+    # cutover week onward, make each weekly point the exact latest-snapshot
+    # minus same-weekday prior-week snapshot comparison used by the dashboard.
+    if granularity == "week" and not df.empty:
+        weekly_reference_dates = {}
+        for snapshot_date in history_snapshot_dates:
+            if effective_reference is not None and snapshot_date > effective_reference:
+                continue
+            week_start = snapshot_date.to_period("W-SUN").start_time
+            weekly_reference_dates[week_start] = max(
+                weekly_reference_dates.get(week_start, snapshot_date),
+                snapshot_date,
+            )
+
+        for week_start, current_date in weekly_reference_dates.items():
+            if week_start < ANALYTICS_WEEKLY_COMPARISON_START:
+                continue
+            previous_date = current_date - pd.Timedelta(days=7)
+            current_rows = df[df["snapshot_date"] == current_date]
+            previous_rows = df[df["snapshot_date"] == previous_date]
+            previous_values = previous_rows.set_index("device_key")[metric].to_dict()
+            regional_deltas = {region: 0.0 for region in ANALYTICS_REGIONS}
+            site_deltas = {}
+
+            for _, row in current_rows.iterrows():
+                previous_value = previous_values.get(row["device_key"])
+                if previous_value is None:
+                    continue
+                delta = float(row[metric]) - float(previous_value)
+                region_name = row["region_name"]
+                regional_deltas[region_name] += delta
+                site_key = (
+                    week_start,
+                    row["site_id"],
+                    str(row["site_name"] or "Unknown site"),
+                    region_name,
+                )
+                site_deltas[site_key] = site_deltas.get(site_key, 0.0) + delta
+
+            for region_name, value in regional_deltas.items():
+                live_weekly_values[(week_start, region_name)] = value
+            for site_key in [key for key in live_weekly_site_values if key[0] == week_start]:
+                del live_weekly_site_values[site_key]
+            live_weekly_site_values.update(site_deltas)
 
     def reporting_month_for_week(week_start):
         # A week belongs to the month of its Sunday. For the in-progress week,

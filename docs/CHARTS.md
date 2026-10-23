@@ -104,6 +104,10 @@ period variance = current reading - previous available reading
 
 The SQL first groups device variances by `(week_start, region)`. For weekly grouping, these regional weekly values are charted directly. For monthly grouping, the endpoint sums those same weekly regional variances; it does not sum raw daily counter values.
 
+### Weekly calculation cutover
+
+Weeks before the cutover on **2026-10-19 (Week 43)** keep the legacy calendar-week `LAG` calculation. Legacy weeks only include snapshots through **2026-10-16**; later snapshots from Oct 17–18 do not revise Week 42. The published Week 42 running-hours value also has a fixed Ancash value of **132.5** to retain the report as it was issued; replaying the current database snapshots produced 132.8 for this cell. Starting Week 43, each weekly value is calculated from the latest snapshot in that ISO week minus the snapshot exactly seven days earlier, matching the main comparison's WoW calculation. Monthly totals use these same preserved legacy weekly values and post-cutover comparison values.
+
 ### Week-to-month assignment
 
 Weeks start on Monday (`date_trunc('week', ...)`). A week is assigned to the month containing its Sunday. For the current incomplete week, Sunday is capped at the effective reference date. For example, the week beginning 2026-09-28 remains assigned to September when the reference date is 2026-09-30. This also puts the week beginning 2026-08-31 into September because its Sunday is 2026-09-06.
@@ -147,7 +151,7 @@ The charts view makes a second request for the other counter so it can show both
 - **Accumulated:** per-region running-hours accumulation using the chart's grouping rule. The total row is the sum of the regional values.
 - **Sites with Running Hrs VAR > 10:** up to ten operational sites sorted by descending site-level `running_hours` variance for that same period. The `Times` column shows the site's `num_starts` variance when available.
 
-When the main dashboard has a comparison period selected, the regional `num_starts` and `running_hours` VARs and the site ranking use the same selected snapshot pair and `computeComparisonDelta()` calculation as the main comparison table. Site values are grouped by `site_id`; the ranking includes sites with running-hours VAR greater than 10. The accumulated column and the line chart remain historical trend outputs calculated by the rules above. If the main dashboard comparison is off or the selected pair is unavailable, the summary falls back to the chart endpoint's latest-period values. Baseline cells remain regional only and cannot produce site rows.
+When the main dashboard has a comparison period selected, the regional `num_starts` and `running_hours` VARs and the site ranking use the same selected snapshot pair and `computeComparisonDelta()` calculation as the main comparison table. Site values are grouped by `site_id`; the ranking includes sites with running-hours VAR greater than 10. Weeks before the **2026-10-19 (Week 43)** cutover retain the legacy ISO-week LAG calculation using snapshots through Oct 16; Week 42's published running-hours Ancash cell is held at 132.5. From Week 43 onward, each weekly point uses the latest snapshot in that ISO week minus the snapshot exactly seven days earlier, matching the main table's WoW arithmetic. Monthly values roll up the same weekly values, and accumulated values are calculated from the resulting timeline. The summary fallback and baseline rules are unchanged.
 
 ## Frontend implementation map
 

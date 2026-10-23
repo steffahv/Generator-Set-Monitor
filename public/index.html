@@ -416,7 +416,8 @@
         vertical-align: top;
       }
 
-      .analytics-summary .region-summary-table {
+      .analytics-summary .region-summary-table,
+      .analytics-summary .top-sites-summary-table {
         display: table;
         width: 480px;
         max-width: 100%;
@@ -424,17 +425,31 @@
       }
 
       .region-summary-table th:nth-child(1),
-      .region-summary-table td:nth-child(1) { width: 75px; }
+      .region-summary-table td:nth-child(1),
+      .top-sites-summary-table th:nth-child(1),
+      .top-sites-summary-table td:nth-child(1) { width: 75px; }
       .region-summary-table th:nth-child(2),
-      .region-summary-table td:nth-child(2) { width: 155px; }
+      .region-summary-table td:nth-child(2),
+      .top-sites-summary-table th:nth-child(2),
+      .top-sites-summary-table td:nth-child(2) { width: 175px; }
       .region-summary-table th:nth-child(3),
-      .region-summary-table td:nth-child(3) { width: 120px; }
+      .region-summary-table td:nth-child(3),
+      .top-sites-summary-table th:nth-child(3),
+      .top-sites-summary-table td:nth-child(3) { width: 115px; }
       .region-summary-table th:nth-child(4),
-      .region-summary-table td:nth-child(4) { width: 130px; }
+      .region-summary-table td:nth-child(4),
+      .top-sites-summary-table th:nth-child(4),
+      .top-sites-summary-table td:nth-child(4) { width: 115px; }
 
       .region-summary-table thead th:nth-child(2) {
         white-space: normal;
         line-height: 1.15;
+      }
+
+      .top-sites-summary-table th:nth-child(2),
+      .top-sites-summary-table td:nth-child(2) {
+        white-space: normal;
+        overflow-wrap: anywhere;
       }
 
       .analytics-summary th,
@@ -1222,6 +1237,7 @@
           .map((site) => [String(site.site_id), Number(site.value)]));
         const topSites = runningSites.slice(0, 10);
         const topTable = document.createElement('table');
+        topTable.className = 'top-sites-summary-table';
         topTable.innerHTML = '<thead><tr><th>Region</th><th>Site</th><th>Running Hrs</th><th>Times</th></tr></thead>';
         const topBody = document.createElement('tbody');
         if (!topSites.length) {
