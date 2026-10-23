@@ -140,14 +140,14 @@ The response includes the actual dates selected. Missing devices are not matched
 
 ## Regional summary and site list
 
-The charts view makes a second request for the other counter so it can show both metrics regardless of which metric is plotted. The selected metric response draws the line chart and initial summary immediately; the companion response then fills the other metric's summary values and site table. Thus, the graph can appear before the complete summary has finished loading.
+The charts view makes a second request for the other counter so it can show both metrics regardless of which metric is plotted. The selected metric response draws the line chart and initial summary immediately; the companion response then fills any values sourced from chart periods.
 
 - **Genset turned on (Num Starts):** the regional `num_starts` period variance for the latest displayed period.
 - **Running Hours:** the regional `running_hours` period variance for that period.
 - **Accumulated:** per-region running-hours accumulation using the chart's grouping rule. The total row is the sum of the regional values.
 - **Sites with Running Hrs VAR > 10:** up to ten operational sites sorted by descending site-level `running_hours` variance for that same period. The `Times` column shows the site's `num_starts` variance when available.
 
-Period values follow the same weekly-delta and monthly-week-rollup rules as the trend chart. The site list can only use operational rows from `generator_daily_history`; `region_historical_baseline` has no site dimension and does not generate site rows. If the complementary metric request fails, values from that metric display as unavailable while the primary chart remains available.
+When the main dashboard has a comparison period selected, the regional `num_starts` and `running_hours` VARs and the site ranking use the same selected snapshot pair and `computeComparisonDelta()` calculation as the main comparison table. Site values are grouped by `site_id`; the ranking includes sites with running-hours VAR greater than 10. The accumulated column and the line chart remain historical trend outputs calculated by the rules above. If the main dashboard comparison is off or the selected pair is unavailable, the summary falls back to the chart endpoint's latest-period values. Baseline cells remain regional only and cannot produce site rows.
 
 ## Frontend implementation map
 

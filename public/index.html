@@ -1084,14 +1084,71 @@
         return true;
       }
 
+      function getDashboardComparisonSummary(metricKey) {
+        const period = comparisonPeriodSelect.value;
+        const activeDate = getActiveSnapshotDate();
+        if (period === 'none' || !activeDate) return null;
+
+        const previousDate = getPreviousSnapshotDate(activeDate, period);
+        if (!previousDate) return null;
+        const dateKey = formatDateKey(activeDate);
+        const regions = ['San Martin', 'Arequipa', 'La Libertad', 'Ancash'];
+        const regionAliases = {
+          sm: 'San Martin', 'san martin': 'San Martin', sanmartin: 'San Martin',
+          ar: 'Arequipa', arequipa: 'Arequipa',
+          ll: 'La Libertad', 'la libertad': 'La Libertad', lalibertad: 'La Libertad',
+          an: 'Ancash', ancash: 'Ancash',
+        };
+        const regionalValues = Object.fromEntries(regions.map((region) => [region, 0]));
+        const sites = new Map();
+        let matched = 0;
+
+        allGenerators
+          .filter((row) => formatDateKey(getSnapshotDateForRow(row)) === dateKey)
+          .forEach((row) => {
+            const comparison = computeComparisonDelta(row, period, metricKey);
+            if (comparison?.delta === null || comparison?.delta === undefined) return;
+            const delta = Number(comparison.delta);
+            if (!Number.isFinite(delta)) return;
+            matched += 1;
+
+            const normalizedRegion = normalizeText(row.reg).replace(/\s+/g, ' ');
+            const compactRegion = normalizedRegion.replace(/[^a-z]/g, '');
+            const region = regionAliases[normalizedRegion] || regionAliases[compactRegion];
+            if (region) regionalValues[region] += delta;
+
+            const key = String(row.site_id ?? row.site ?? row.router_ip ?? row.device_index);
+            if (!sites.has(key)) {
+              sites.set(key, {
+                site_id: row.site_id,
+                name: row.site || 'Unknown site',
+                region: region || row.reg || '',
+                value: 0,
+                period: `${formatDisplayDate(previousDate)} vs ${formatDisplayDate(activeDate)}`,
+              });
+            }
+            sites.get(key).value += delta;
+          });
+
+        return matched ? { regionalValues, site_values: [...sites.values()] } : null;
+      }
+
       function renderAnalyticsSummary(chartData, companionData) {
         const runningData = chartData.metric === 'running_hours' ? chartData : companionData;
         const startsData = chartData.metric === 'num_starts' ? chartData : companionData;
         const runningAvailable = Boolean(runningData);
         const startsAvailable = Boolean(startsData);
         const periodLabel = chartData.labels[chartData.labels.length - 1];
-        document.getElementById('analyticsSummaryPeriod').textContent = periodLabel
-          ? `Latest displayed period: ${periodLabel}. Regional values are period VARs; accumulated is the running total.`
+        const runningComparison = getDashboardComparisonSummary('running_hours');
+        const startsComparison = getDashboardComparisonSummary('num_starts');
+        const comparisonActiveDate = getActiveSnapshotDate();
+        const comparisonPreviousDate = comparisonActiveDate
+          ? getPreviousSnapshotDate(comparisonActiveDate, comparisonPeriodSelect.value)
+          : null;
+        document.getElementById('analyticsSummaryPeriod').textContent = runningComparison || startsComparison
+          ? `Comparison VAR: ${formatDisplayDate(comparisonPreviousDate)} vs ${formatDisplayDate(comparisonActiveDate)}. Accumulated remains the chart running total.`
+          : periodLabel
+            ? `Latest displayed period: ${periodLabel}. Regional values are period VARs; accumulated is the running total.`
           : 'No period data available.';
 
         const readSeriesValue = (data, collection, region) => {
@@ -1108,8 +1165,8 @@
         const regions = ['San Martin', 'Arequipa', 'La Libertad', 'Ancash'];
         const summaryRows = regions.map((region) => ({
           region,
-          starts: readSeriesValue(startsData, 'sites', region),
-          running: readSeriesValue(runningData, 'sites', region),
+          starts: startsComparison?.regionalValues[region] ?? readSeriesValue(startsData, 'sites', region),
+          running: runningComparison?.regionalValues[region] ?? readSeriesValue(runningData, 'sites', region),
           accumulated: readSeriesValue(runningData, 'regional_accumulated', region),
         }));
         const sumValues = (key) => {
@@ -1154,11 +1211,14 @@
         summaryTable.appendChild(summaryFooter);
         analyticsRegionSummary.replaceChildren(summaryTable);
 
-        const runningSites = (runningData?.site_values || [])
-          .filter((site) => site.period === periodLabel && Number(site.value) > 10)
+        const runningSiteValues = runningComparison?.site_values || (runningData?.site_values || [])
+          .filter((site) => site.period === periodLabel);
+        const startsSiteValues = startsComparison?.site_values || (startsData?.site_values || [])
+          .filter((site) => site.period === periodLabel);
+        const runningSites = runningSiteValues
+          .filter((site) => Number(site.value) > 10)
           .sort((a, b) => Number(b.value) - Number(a.value));
-        const startsBySite = new Map((startsData?.site_values || [])
-          .filter((site) => site.period === periodLabel)
+        const startsBySite = new Map(startsSiteValues
           .map((site) => [String(site.site_id), Number(site.value)]));
         const topSites = runningSites.slice(0, 10);
         const topTable = document.createElement('table');
