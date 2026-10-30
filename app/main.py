@@ -742,18 +742,17 @@ def generator_trends(
         )
 
     # Keep previously reported calendar-week values unchanged. From the
-    # cutover week onward, make each weekly point the exact latest-snapshot
-    # minus same-weekday prior-week snapshot comparison used by the dashboard.
+    # cutover week onward, align every weekly endpoint with the reference
+    # weekday, then subtract the capture exactly seven days earlier. Later
+    # weekend captures must not replace Friday's reported WoW comparison.
     if granularity == "week" and not df.empty:
         weekly_reference_dates = {}
+        reference_weekday = effective_reference.weekday()
         for snapshot_date in history_snapshot_dates:
             if effective_reference is not None and snapshot_date > effective_reference:
                 continue
             week_start = snapshot_date.to_period("W-SUN").start_time
-            weekly_reference_dates[week_start] = max(
-                weekly_reference_dates.get(week_start, snapshot_date),
-                snapshot_date,
-            )
+            weekly_reference_dates[week_start] = week_start + pd.Timedelta(days=reference_weekday)
 
         for week_start, current_date in weekly_reference_dates.items():
             if week_start < ANALYTICS_WEEKLY_COMPARISON_START:
