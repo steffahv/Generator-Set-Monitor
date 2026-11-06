@@ -102,17 +102,17 @@ period variance = current reading - previous available reading
 - A null metric row is excluded from the `LAG` input; it is not treated as zero. The next available non-null reading is compared with the preceding available non-null reading. If snapshots were missed, that multi-day change is assigned to the later reading's week.
 - The application does not interpolate missing snapshots.
 
-The SQL first groups device variances by `(week_start, region)`. For weekly grouping, these regional weekly values are charted directly. For monthly grouping, the endpoint sums those same weekly regional variances; it does not sum raw daily counter values.
+Weekly grouping uses the weekly calculations described below. Monthly grouping is calculated separately at calendar-month boundaries: for each generator, it subtracts the latest available counter reading on or before the previous month's final calendar day from the latest reading on or before the current month's final day (capped at the effective reference date for the current month). This avoids assigning a whole cross-month week to one month. If a counter resets between those readings, the current reading is used as the month's variance. A generator without readings on both sides of the boundary does not contribute an operational monthly delta.
 
 ### Weekly calculation cutover
 
 Weeks before the cutover on **2026-10-19 (Week 43)** keep the legacy calendar-week `LAG` calculation. Legacy weeks only include snapshots through **2026-10-16**; later snapshots from Oct 17–18 do not revise Week 42. The published Week 42 running-hours value also has a fixed Ancash value of **132.5** to retain the report as it was issued; replaying the current database snapshots produced 132.8 for this cell. Starting Week 43, each weekly value is calculated from the snapshot on the effective reference date's weekday in that ISO week minus the snapshot exactly seven days earlier, matching the main comparison's WoW calculation. Monthly totals use these same preserved legacy weekly values and post-cutover comparison values.
 
-For example, a reference date of October 30, 2026 (Friday) selects October 23 minus October 16 for Week 43, and October 30 minus October 23 for Week 44. Later weekend captures do not replace these Friday reporting dates. This weekday alignment applies to the weekly chart for both metrics.
+For example, a reference date of October 30, 2026 (Friday) selects October 23 minus October 16 for Week 43, and October 30 minus October 23 for Week 44. Later weekend captures do not replace these Friday reporting dates. This weekday alignment applies to the weekly chart for both metrics. Monthly totals do not roll up these weekly values; each monthly point uses its own calendar-boundary readings.
 
-### Week-to-month assignment
+### Calendar-month boundaries
 
-Weeks start on Monday (`date_trunc('week', ...)`). A week is assigned to the month containing its Sunday. For the current incomplete week, Sunday is capped at the effective reference date. For example, the week beginning 2026-09-28 remains assigned to September when the reference date is 2026-09-30. This also puts the week beginning 2026-08-31 into September because its Sunday is 2026-09-06.
+Monthly values use calendar dates, not week-to-month assignment. For a reference date of November 6, the November point compares each generator's latest available reading on or before November 6 with its latest reading on or before October 31. If the October 31 capture is absent, the latest earlier reading is used as the available boundary reading; the chart does not interpolate a missing capture. As a result, a monthly value and a weekly value need not match when their comparison intervals have different start/end dates. For example, the weekly October 30–November 6 comparison includes dates from October, while the November monthly point is anchored at the October 31 calendar boundary.
 
 ### Baseline merge, totals, and accumulation
 
@@ -126,7 +126,7 @@ Operational and baseline values are not added together for one cell. This is a c
 
 `GE Total hours` or `GE Total starts` is the sum of the four regional period values. Missing cells are initialized to zero in the chart dataframe and JSON arrays; the endpoint does not preserve absent period/region cells as `null`.
 
-- **Monthly accumulated:** cumulative sum of monthly GE totals through the full available timeline. A September point therefore includes January through September, not September alone.
+- **Monthly accumulated:** cumulative sum of calendar-month GE totals through the full available timeline. A September point therefore includes January through September, not September alone.
 - **Weekly accumulated:** cumulative sum of weekly GE totals, grouped by assigned reporting month. It resets when that reporting month changes. For September, the Week 36–39 example totals `149.0 + 193.8 + 86.8 + 18.0 = 447.6`; Week 40 adds its current weekly variance.
 
 Accumulation is calculated before the chart is sliced to its latest 12 labels.
@@ -153,7 +153,7 @@ The charts view makes a second request for the other counter so it can show both
 - **Accumulated:** per-region running-hours accumulation using the chart's grouping rule. The total row is the sum of the regional values.
 - **Sites with Running Hrs VAR > 10:** up to ten operational sites sorted by descending site-level `running_hours` variance for that same period. The `Times` column shows the site's `num_starts` variance when available.
 
-When the main dashboard has a comparison period selected, the regional `num_starts` and `running_hours` VARs and the site ranking use the same selected snapshot pair and `computeComparisonDelta()` calculation as the main comparison table. Site values are grouped by `site_id`; the ranking includes sites with running-hours VAR greater than 10. Weeks before the **2026-10-19 (Week 43)** cutover retain the legacy ISO-week LAG calculation using snapshots through Oct 16; Week 42's published running-hours Ancash cell is held at 132.5. From Week 43 onward, each weekly point uses the snapshot on the effective reference date's weekday in that ISO week minus the snapshot exactly seven days earlier, matching the main table's WoW arithmetic. Monthly values roll up the same weekly values, and accumulated values are calculated from the resulting timeline. The summary fallback and baseline rules are unchanged.
+When the main dashboard has a comparison period selected, the regional `num_starts` and `running_hours` VARs and the site ranking use the same selected snapshot pair and `computeComparisonDelta()` calculation as the main comparison table. Site values are grouped by `site_id`; the ranking includes sites with running-hours VAR greater than 10. Weeks before the **2026-10-19 (Week 43)** cutover retain the legacy ISO-week LAG calculation using snapshots through Oct 16; Week 42's published running-hours Ancash cell is held at 132.5. From Week 43 onward, each weekly point uses the snapshot on the effective reference date's weekday in that ISO week minus the snapshot exactly seven days earlier, matching the main table's WoW arithmetic. Monthly values use calendar-boundary readings, independently of weekly values. Accumulated values are calculated from the resulting timeline. The summary fallback and baseline rules are unchanged.
 
 ## Frontend implementation map
 

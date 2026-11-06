@@ -634,9 +634,9 @@ def generator_trends(
     live_weekly_values = {}
     live_weekly_site_values = {}
     live_period_query = None
-    if effective_reference is not None:
-        # Keep operational deltas at weekly grain. The monthly view is rolled
-        # up from these same weekly regional variances below.
+    if effective_reference is not None and granularity == "week":
+        # Weekly deltas use a same-weekday comparison; monthly deltas use
+        # calendar-boundary snapshots below.
         period_unit = "week"
         live_period_query = text(f"""
             WITH ranked_snapshots AS (
@@ -797,15 +797,56 @@ def generator_trends(
         live_values = live_weekly_values
         live_site_values = live_weekly_site_values
     else:
-        # Monthly operational values are the sum of weekly regional variances.
         live_values = {}
-        for (week_start, region_name), value in live_weekly_values.items():
-            key = (reporting_month_for_week(week_start), region_name)
-            live_values[key] = live_values.get(key, 0.0) + value
         live_site_values = {}
-        for (week_start, site_id, site_name, region_name), value in live_weekly_site_values.items():
-            key = (reporting_month_for_week(week_start), site_id, site_name, region_name)
-            live_site_values[key] = live_site_values.get(key, 0.0) + value
+        if not df.empty:
+            snapshot_cache = {}
+
+            def snapshots_at_or_before(cutoff):
+                cutoff = pd.Timestamp(cutoff)
+                if cutoff not in snapshot_cache:
+                    eligible = df[df["snapshot_date"] <= cutoff]
+                    snapshot_cache[cutoff] = (
+                        eligible.sort_values("snapshot_date")
+                        .drop_duplicates(subset=["device_key"], keep="last")
+                        .set_index("device_key")
+                    )
+                return snapshot_cache[cutoff]
+
+            monthly_periods = sorted({
+                pd.Timestamp(snapshot_date).to_period("M").start_time
+                for snapshot_date in df["snapshot_date"]
+            })
+            for period in monthly_periods:
+                month_end = min(
+                    period + pd.offsets.MonthEnd(0),
+                    pd.Timestamp(effective_reference),
+                )
+                previous_month_end = period - pd.Timedelta(days=1)
+                current_rows = snapshots_at_or_before(month_end)
+                previous_rows = snapshots_at_or_before(previous_month_end)
+
+                for device_key, current_row in current_rows.iterrows():
+                    if device_key not in previous_rows.index:
+                        continue
+                    current_value = float(current_row[metric])
+                    previous_value = float(previous_rows.at[device_key, metric])
+                    delta = (
+                        current_value - previous_value
+                        if current_value >= previous_value
+                        else current_value
+                    )
+                    region_name = current_row["region_name"]
+                    region_key = (period, region_name)
+                    live_values[region_key] = live_values.get(region_key, 0.0) + delta
+
+                    site_key = (
+                        period,
+                        current_row["site_id"],
+                        str(current_row["site_name"] or "Unknown site"),
+                        region_name,
+                    )
+                    live_site_values[site_key] = live_site_values.get(site_key, 0.0) + delta
 
     if effective_reference is not None:
         baseline_values = {
