@@ -739,7 +739,7 @@
           </div>
         </div>
 
-        <p class="muted">Monthly values use calendar-month boundaries through the reference date; weekly values are calculated separately. A weekly comparison that crosses a month boundary can include days from both months.</p>
+        <p id="chartPeriodExplanation" class="muted"></p>
         <p id="analyticsStatus" class="muted chart-status" aria-live="polite"></p>
         <div class="analytics-layout">
           <aside class="analytics-summary">
@@ -1296,6 +1296,9 @@
           const data = await fetchJson(`${API_BASE}/analytics/generator-trends?${params.toString()}`);
           const granularityLabel = analyticsGranularity.value === 'month' ? 'Month' : 'Week';
           document.getElementById('trendChartTitle').textContent = `GE ${data.metric_label} by ${granularityLabel}`;
+          document.getElementById('chartPeriodExplanation').textContent = data.granularity === 'month'
+            ? 'Monthly values compare readings at calendar-month boundaries through the reference date. A week crossing month-end is not added as a whole to either month.'
+            : 'Weekly values compare readings week over week. A week crossing month-end remains one weekly comparison and is not split into calendar-month totals.';
 
           if (!data.labels.length) {
             if (trendChartInstance) {
