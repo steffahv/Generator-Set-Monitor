@@ -50,8 +50,8 @@ Response fields:
 - `labels`: monthly view includes periods from May 2026 (up to 12); weekly view includes only the latest four ISO weeks through the effective reference date.
 - `sites`: four `{name, values}` regional series (the `sites` key is retained for frontend compatibility): `San Martin`, `Arequipa`, `La Libertad`, and `Ancash`.
 - `total`: horizontal sum of the four regional period values.
-- `accumulated`: monthly cumulative total or weekly total accumulated within each reporting month.
-- `regional_accumulated`: per-region counterpart to `accumulated`, using the same monthly continuous or weekly reporting-month reset rule.
+- `accumulated`: monthly cumulative total or weekly total accumulated within the calendar month when each ISO week starts.
+- `regional_accumulated`: per-region counterpart to `accumulated`, using the same monthly continuous or weekly calendar-month rule.
 - `site_values`: site-level operational deltas for the latest visible period for the requested metric. Baseline cells have no site-level breakdown and are not represented here.
 - `comparison`: `null` when comparison is off; otherwise actual selected snapshot dates, region names, and raw previous/current metric totals.
 - `baseline_cells_used`: number of missing operational `(period, region)` cells supplied by baseline data across the full timeline.
@@ -127,11 +127,9 @@ Operational and baseline values are not added together for one cell. This is a c
 `GE Total hours` or `GE Total starts` is the sum of the four regional period values. Missing cells are initialized to zero in the chart dataframe and JSON arrays; the endpoint does not preserve absent period/region cells as `null`.
 
 - **Monthly accumulated:** cumulative sum of calendar-month GE totals through the full available timeline. A September point therefore includes January through September, not September alone.
-- **Weekly accumulated:** cumulative sum of weekly GE totals, grouped by assigned reporting month. It resets when that reporting month changes. For September, the Week 36–39 example totals `149.0 + 193.8 + 86.8 + 18.0 = 447.6`; Week 40 adds its current weekly variance.
+- **Weekly accumulated:** cumulative sum of weekly GE totals within the calendar month when each ISO week starts. A week crossing a month boundary belongs to the month containing its Monday.
 
-Accumulation is calculated before the chart is sliced to its latest 12 labels.
-
-For the weekly view, the visible chart is sliced to four weeks only after deltas and running totals have been calculated across the full timeline. Monthly is similarly limited to the supported window beginning May 2026. This keeps accumulated values consistent with earlier periods that are not currently visible.
+Monthly accumulation is calculated over the full available timeline before the chart is sliced to its latest 12 labels, so earlier months still contribute to the displayed cumulative values. Weekly accumulation also uses the full available timeline and resets at calendar-month boundaries based on each ISO week's Monday. The chart still displays only the latest four weeks, but the accumulated table value includes earlier weeks from that month even when they are outside the visible chart window.
 
 ## Snapshot comparison and missing coverage
 
@@ -150,7 +148,7 @@ The charts view makes a second request for the other counter so it can show both
 
 - **Genset turned on (Num Starts):** the regional `num_starts` period variance for the latest displayed period.
 - **Running Hours:** the regional `running_hours` period variance for that period.
-- **Accumulated:** per-region running-hours accumulation using the chart's grouping rule. The total row is the sum of the regional values.
+- **Accumulated:** per-region running-hours accumulation using the chart's grouping rule. For weekly charts it is month-to-date, grouped by the month containing the week's Monday; the total row is the sum of the regional values.
 - **Sites with Running Hrs VAR > 10:** up to ten operational sites sorted by descending site-level `running_hours` variance for that same period. The `Times` column shows the site's `num_starts` variance when available.
 
 When the main dashboard has a comparison period selected, the regional `num_starts` and `running_hours` VARs and the site ranking use the same selected snapshot pair and `computeComparisonDelta()` calculation as the main comparison table. Site values are grouped by `site_id`; the ranking includes sites with running-hours VAR greater than 10. Weeks before the **2026-10-19 (Week 43)** cutover retain the legacy ISO-week LAG calculation using snapshots through Oct 16; Week 42's published running-hours Ancash cell is held at 132.5. From Week 43 onward, each weekly point uses the snapshot on the effective reference date's weekday in that ISO week minus the snapshot exactly seven days earlier, matching the main table's WoW arithmetic. Monthly values use calendar-boundary readings, independently of weekly values. Accumulated values are calculated from the resulting timeline. The summary fallback and baseline rules are unchanged.

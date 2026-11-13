@@ -46,6 +46,50 @@ def test_weekly_wow_uses_reference_weekday_despite_weekend_captures(monkeypatch,
     assert result["site_values"][0]["value"] == 20.0
 
 
+def test_weekly_accumulation_resets_by_calendar_month(monkeypatch):
+    readings = {
+        "2026-10-09": 90.0,
+        "2026-10-16": 100.0,
+        "2026-10-23": 110.0,
+        "2026-10-30": 130.0,
+        "2026-11-06": 160.0,
+        "2026-11-13": 200.0,
+    }
+    records = [
+        (1, 1, "Test site", "Ancash", "generator", 1, day, value)
+        for day, value in readings.items()
+    ]
+    monkeypatch.setattr(main, "get_cached_analytics_history", lambda *args: records)
+
+    class EmptyResult:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+    class FakeDB:
+        def execute(self, *args):
+            return EmptyResult()
+
+    result = main.generator_trends(
+        metric="running_hours",
+        granularity="week",
+        reference_date=date(2026, 11, 13),
+        db=FakeDB(),
+    )
+    ancash = next(item for item in result["regional_accumulated"] if item["name"] == "Ancash")
+
+    assert result["labels"] == [
+        "Week 43 (2026)",
+        "Week 44 (2026)",
+        "Week 45 (2026)",
+        "Week 46 (2026)",
+    ]
+    assert ancash["values"] == [20.0, 40.0, 30.0, 70.0]
+    assert result["accumulated"] == [20.0, 40.0, 30.0, 70.0]
+
+
 def test_monthly_trend_uses_calendar_month_boundary_not_cross_month_week(monkeypatch):
     readings = {
         "2026-09-30": 90.0,

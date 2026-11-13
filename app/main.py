@@ -785,14 +785,6 @@ def generator_trends(
                 del live_weekly_site_values[site_key]
             live_weekly_site_values.update(site_deltas)
 
-    def reporting_month_for_week(week_start):
-        # A week belongs to the month of its Sunday. For the in-progress week,
-        # cap that date at the reference date so Week 40 on Sep 28 stays in Sep.
-        week_end = pd.Timestamp(week_start) + pd.Timedelta(days=6)
-        if effective_reference is not None:
-            week_end = min(week_end, pd.Timestamp(effective_reference))
-        return week_end.to_period("M").start_time
-
     if granularity == "week":
         live_values = live_weekly_values
         live_site_values = live_weekly_site_values
@@ -875,30 +867,24 @@ def generator_trends(
         grouped = pd.DataFrame(columns=ANALYTICS_REGIONS, index=pd.DatetimeIndex([]), dtype=float)
 
     if granularity == "month":
+        monthly_chart_start = pd.Timestamp("2026-05-01")
+        visible_periods = grouped.index[grouped.index >= monthly_chart_start][-12:]
         label_for_period = lambda value: value.strftime("%b-%y")
         accumulated_series = grouped.sum(axis=1).cumsum()
         regional_accumulated = grouped.cumsum(axis=0)
     else:
+        visible_periods = grouped.index[-4:]
         label_for_period = lambda value: f"Week {value.isocalendar().week} ({value.isocalendar().year})"
-        # Group weekly accumulation by its reporting month, not Monday's month;
-        # this keeps Week 36 (Aug 31–Sep 6) in September's running total.
-        week_reporting_months = pd.Series(
-            [reporting_month_for_week(period) for period in grouped.index],
+        week_start_months = pd.Series(
+            grouped.index.to_period("M"),
             index=grouped.index,
         )
-        accumulated_series = grouped.sum(axis=1).groupby(week_reporting_months).cumsum()
+        accumulated_series = grouped.sum(axis=1).groupby(week_start_months).cumsum()
         regional_accumulated = pd.DataFrame(0.0, index=grouped.index, columns=ANALYTICS_REGIONS)
         for region in ANALYTICS_REGIONS:
-            regional_accumulated[region] = grouped[region].groupby(week_reporting_months).cumsum()
+            regional_accumulated[region] = grouped[region].groupby(week_start_months).cumsum()
 
     total_series = grouped.sum(axis=1)
-    # Limit the displayed window after calculating running totals on the full
-    # timeline, so earlier history still contributes to the accumulated series.
-    if granularity == "week":
-        visible_periods = grouped.index[-4:]
-    else:
-        monthly_chart_start = pd.Timestamp("2026-05-01")
-        visible_periods = grouped.index[grouped.index >= monthly_chart_start][-12:]
     latest_visible_period = visible_periods[-1] if len(visible_periods) else None
     site_values = []
     if latest_visible_period is not None:
